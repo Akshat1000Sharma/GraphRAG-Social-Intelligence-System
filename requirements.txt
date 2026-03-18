@@ -1,0 +1,48 @@
+# ─── Core ML ───────────────────────────────────────────────────────────────────
+torch==2.1.2
+torchvision==0.16.2
+torch-geometric==2.4.0
+torch-scatter==2.1.2
+torch-sparse==0.6.18
+torch-cluster==1.6.3
+numpy==1.26.2
+scikit-learn==1.3.2
+scipy==1.11.4
+
+# ─── NLP & Embeddings ──────────────────────────────────────────────────────────
+sentence-transformers==2.2.2
+transformers==4.36.2
+tokenizers==0.15.0
+
+# ─── Vector Search ─────────────────────────────────────────────────────────────
+faiss-cpu==1.7.4
+
+# ─── Graph Database ────────────────────────────────────────────────────────────
+neo4j==5.14.0
+
+# ─── API Framework ─────────────────────────────────────────────────────────────
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+pydantic==2.5.2
+python-multipart==0.0.6
+httpx==0.25.2
+
+# ─── LangChain + Gemini (KAG) ──────────────────────────────────────────────────
+langchain==0.1.20
+langchain-core==0.1.52
+langchain-google-genai==1.0.6
+google-generativeai==0.5.4
+
+# ─── Data ──────────────────────────────────────────────────────────────────────
+pandas==2.1.4
+pyarrow==14.0.1
+
+# ─── Utilities ─────────────────────────────────────────────────────────────────
+python-dotenv==1.0.0
+pyyaml==6.0.1
+tqdm==4.66.1
+rich==13.7.0
+
+# ─── Dev / Testing ─────────────────────────────────────────────────────────────
+pytest==7.4.3
+pytest-asyncio==0.21.1
