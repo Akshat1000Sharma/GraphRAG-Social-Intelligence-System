@@ -41,7 +41,7 @@ class GNN(nn.Module):
         return z,logits,torch.cat([pred(pos),pred(neg)])
 
 def load():
-    path="/kaggle/input/facebook-large-page-page-network/musae_facebook_edges.csv"
+    path="/kaggle/working/facebook_data/facebook_large/musae_facebook_edges.csv"
     if os.path.exists(path):
         import pandas as pd
         df=pd.read_csv(path)
@@ -71,9 +71,14 @@ def train():
 
         if ep%10==0:
             m.eval(); z=m.encode(x,e)
-            auc=roc_auc_score(np.r_[np.ones(pos.size(1)),np.zeros(pos.size(1))],
-                              torch.cat([m(x,e,pos,pos)[2][:pos.size(1)],
-                                         m(x,e,pos,pos)[2][pos.size(1):]]).cpu())
+            preds = torch.cat([
+                m(x, e, pos, pos)[2][:pos.size(1)],
+                m(x, e, pos, pos)[2][pos.size(1):]
+            ]).detach().cpu().numpy()
+            
+            labels = np.r_[np.ones(pos.size(1)), np.zeros(pos.size(1))]
+            
+            auc = roc_auc_score(labels, preds)
             if auc>best:
                 best=auc; torch.save(m.state_dict(),f"{OUTPUT_DIR}/best.pth")
 
@@ -82,4 +87,6 @@ def train():
     np.save(f"{OUTPUT_DIR}/embeddings_facebook.npy",
             m.encode(d.x.cuda(),d.train_pos_edge_index.cuda()).cpu().detach().numpy())
     print("Training successfully completed!")
-if __name__=="__main__": train()
+    
+if __name__=="__main__": 
+    train()
