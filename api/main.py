@@ -5,6 +5,12 @@ Endpoints: friend recommendations, influencer detection, trending posts,
 """
 
 import os
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+# Load api/.env before any module reads os.environ (e.g. db.neo4j_client).
+load_dotenv(Path(__file__).resolve().parent / ".env")
 import logging
 from contextlib import asynccontextmanager
 from typing import Optional

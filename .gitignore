@@ -1,1 +1,3 @@
-/research_paper_implementation/.env
+.env
+venv
+__pycache__/

@@ -1,92 +1,356 @@
-# train_facebook.py (PRODUCTION)
+# train_facebook.py
+# Mirrors all Jupyter notebook cells end-to-end in a single script.
 
-import os, time, logging, numpy as np, torch
+# ── Imports ────────────────────────────────────────────────────────────────────
+import os
+import csv
+import json
+import zipfile
+import logging
+import numpy as np
+import pandas as pd
+import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+from sklearn.preprocessing import LabelEncoder
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import roc_auc_score
+
+from sentence_transformers import SentenceTransformer
 from torch_geometric.data import Data
-from torch_geometric.utils import to_undirected, train_test_split_edges
-from torch_geometric.nn import GCNConv
-from sklearn.metrics import roc_auc_score, f1_score
+from torch_geometric.nn import SAGEConv
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# CONFIG
-FEATURE_DIM=128; HIDDEN_DIM=512; EMBEDDING_DIM=128
-NUM_CLASSES=4; NUM_LAYERS=5; DROPOUT=0.4
-LR=1e-3; WD=1e-4; EPOCHS=300; PATIENCE=40; NEG_RATIO=5
-OUTPUT_DIR="weights"
+# ── Config ─────────────────────────────────────────────────────────────────────
+HIDDEN_DIM   = 128
+EPOCHS       = 101
+LR           = 0.01
+WD           = 5e-4
+DROPOUT      = 0.3
+OUTPUT_DIR   = "weights"
+DATA_PATH    = "/kaggle/working/facebook_data/facebook_large"
+DATASET_URL  = "https://snap.stanford.edu/data/facebook_large.zip"
+EXTRACT_PATH = "/kaggle/working/facebook_data"
 
-def build_features(edge_index, n):
-    deg=torch.bincount(edge_index[0], minlength=n).float().unsqueeze(1)
-    return torch.cat([deg, torch.log1p(deg), torch.randn(n, FEATURE_DIM-2)*0.1], dim=1)
 
-class GNN(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.convs=nn.ModuleList([GCNConv(FEATURE_DIM,HIDDEN_DIM)] +
-            [GCNConv(HIDDEN_DIM,HIDDEN_DIM) for _ in range(NUM_LAYERS-2)] +
-            [GCNConv(HIDDEN_DIM,EMBEDDING_DIM)])
-        self.cls=nn.Linear(EMBEDDING_DIM,NUM_CLASSES)
+# ══════════════════════════════════════════════════════════════════════════════
+# Cell 1 equivalent: install check reminder
+# (packages assumed pre-installed; run:
+#   pip install torch torchvision torchaudio torch-geometric sentence-transformers)
+# ══════════════════════════════════════════════════════════════════════════════
 
-    def encode(self,x,e):
-        for c in self.convs:
-            x=F.dropout(F.relu(c(x,e)),p=DROPOUT,training=self.training)
-        return x
-
-    def forward(self,x,e,pos,neg):
-        z=self.encode(x,e)
-        logits=self.cls(z)
-        pred=lambda ed: torch.sigmoid((z[ed[0]]*z[ed[1]]).sum(1))
-        return z,logits,torch.cat([pred(pos),pred(neg)])
-
-def load():
-    path="/kaggle/working/facebook_data/facebook_large/musae_facebook_edges.csv"
-    if os.path.exists(path):
-        import pandas as pd
-        df=pd.read_csv(path)
-        ei=torch.tensor([df["id_1"],df["id_2"]])
+# ══════════════════════════════════════════════════════════════════════════════
+# Cell 2: Download and extract dataset
+# ══════════════════════════════════════════════════════════════════════════════
+def download_and_extract():
+    zip_path = "facebook_large.zip"
+    if not os.path.exists(zip_path):
+        logger.info("Downloading dataset...")
+        os.system(f"wget -q {DATASET_URL}")
     else:
-        logger.warning("Synthetic")
-        ei=torch.randint(0,10000,(2,100000))
-    ei=to_undirected(ei)
-    n=ei.max().item()+1
-    return Data(x=build_features(ei,n),edge_index=ei,y=torch.randint(0,NUM_CLASSES,(n,)),num_nodes=n)
+        logger.info("Zip already exists, skipping download.")
 
-def train():
-    d=load(); d=train_test_split_edges(d)
-    m=GNN().cuda() if torch.cuda.is_available() else GNN()
-    opt=torch.optim.Adam(m.parameters(),lr=LR,weight_decay=WD)
-    sch=torch.optim.lr_scheduler.CosineAnnealingLR(opt,EPOCHS)
+    os.makedirs(EXTRACT_PATH, exist_ok=True)
+    with zipfile.ZipFile(zip_path, "r") as z:
+        z.extractall(EXTRACT_PATH)
 
-    best=0; os.makedirs(OUTPUT_DIR,exist_ok=True)
-    for ep in range(EPOCHS):
-        m.train(); opt.zero_grad()
-        x,e=d.x.cuda(),d.train_pos_edge_index.cuda()
-        pos=e; neg=torch.randint(0,d.num_nodes,(2,pos.size(1)*NEG_RATIO)).cuda()
-        z,logits,lp=m(x,e,pos,neg)
-        loss=F.cross_entropy(logits,d.y.cuda())+F.binary_cross_entropy(lp,
-            torch.cat([torch.ones(pos.size(1)),torch.zeros(neg.size(1))]).cuda())
-        loss.backward(); opt.step(); sch.step()
+    logger.info("Dataset ready at: %s", EXTRACT_PATH)
+    logger.info("Files: %s", os.listdir(EXTRACT_PATH))
 
-        if ep%10==0:
-            m.eval(); z=m.encode(x,e)
-            preds = torch.cat([
-                m(x, e, pos, pos)[2][:pos.size(1)],
-                m(x, e, pos, pos)[2][pos.size(1):]
-            ]).detach().cpu().numpy()
-            
-            labels = np.r_[np.ones(pos.size(1)), np.zeros(pos.size(1))]
-            
-            auc = roc_auc_score(labels, preds)
-            if auc>best:
-                best=auc; torch.save(m.state_dict(),f"{OUTPUT_DIR}/best.pth")
 
-    m.load_state_dict(torch.load(f"{OUTPUT_DIR}/best.pth"))
-    torch.save(m.state_dict(),f"{OUTPUT_DIR}/model_weights_facebook.pth")
-    np.save(f"{OUTPUT_DIR}/embeddings_facebook.npy",
-            m.encode(d.x.cuda(),d.train_pos_edge_index.cuda()).cpu().detach().numpy())
+# ══════════════════════════════════════════════════════════════════════════════
+# Cell 3: Resolve file paths
+# ══════════════════════════════════════════════════════════════════════════════
+def get_paths():
+    edges_path    = os.path.join(DATA_PATH, "musae_facebook_edges.csv")
+    features_path = os.path.join(DATA_PATH, "musae_facebook_features.json")
+    target_path   = os.path.join(DATA_PATH, "musae_facebook_target.csv")
+    return edges_path, features_path, target_path
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Cell 4: Load edges
+# ══════════════════════════════════════════════════════════════════════════════
+def load_edges(edges_path):
+    edges = pd.read_csv(edges_path)
+    logger.info("Edges head:\n%s", edges.head())
+    logger.info("Total edges: %d", len(edges))
+    return edges
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Cell 5: Load labels
+# ══════════════════════════════════════════════════════════════════════════════
+def load_labels(target_path):
+    labels_dict = {}
+    with open(target_path, "r") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            labels_dict[int(row["id"])] = row["page_type"]
+
+    nodes = sorted(labels_dict.keys())
+    le    = LabelEncoder()
+    Y     = le.fit_transform([labels_dict[n] for n in nodes])
+    logger.info("Classes: %d", len(set(Y)))
+    return nodes, Y, le
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Cell 6: Build one-hot features from JSON feature file
+# ══════════════════════════════════════════════════════════════════════════════
+def build_onehot_features(features_path, nodes):
+    with open(features_path, "r") as f:
+        features_dict = json.load(f)
+
+    node_to_idx = {node: i for i, node in enumerate(nodes)}
+
+    max_feature = 0
+    for feats in features_dict.values():
+        if feats:
+            max_feature = max(max_feature, max(feats))
+
+    X = np.zeros((len(nodes), max_feature + 1))
+    for node_str, feats in features_dict.items():
+        node = int(node_str)          # JSON keys are strings
+        if node in node_to_idx and feats:
+            X[node_to_idx[node], feats] = 1
+
+    logger.info("One-hot feature shape: %s", X.shape)
+    return X, node_to_idx
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Cell 7: Build text documents for each node
+# ══════════════════════════════════════════════════════════════════════════════
+def build_documents(nodes):
+    documents = []
+    for node in nodes:
+        doc = f"""
+    Node ID: {node}
+    This is a Facebook page in a social network graph.
+    It is connected to other pages.
+    """
+        documents.append(doc)
+    logger.info("Sample document: %s", documents[0])
+    return documents
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Cell 8: Encode documents with SentenceTransformer
+# ══════════════════════════════════════════════════════════════════════════════
+def encode_text(documents):
+    encoder         = SentenceTransformer("all-MiniLM-L6-v2")
+    text_embeddings = encoder.encode(documents, show_progress_bar=True, batch_size=64)
+    text_embeddings = np.array(text_embeddings)
+    logger.info("Text embedding shape: %s", text_embeddings.shape)
+    return text_embeddings
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Cell 9: Build edge_index tensor
+# ══════════════════════════════════════════════════════════════════════════════
+def build_edge_index(edges, node_to_idx):
+    edge_index = []
+    for _, row in edges.iterrows():
+        src_id = int(row["id_1"])
+        dst_id = int(row["id_2"])
+        if src_id in node_to_idx and dst_id in node_to_idx:
+            src = node_to_idx[src_id]
+            dst = node_to_idx[dst_id]
+            edge_index.append([src, dst])
+            edge_index.append([dst, src])
+
+    edge_index = torch.tensor(edge_index, dtype=torch.long).t().contiguous()
+    logger.info("Edge index shape: %s", edge_index.shape)
+    return edge_index
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Cell 10: Combine features and build PyG Data object
+# ══════════════════════════════════════════════════════════════════════════════
+def build_data(X, text_embeddings, edge_index, Y):
+    X_combined = np.concatenate([X, text_embeddings], axis=1)
+    x    = torch.tensor(X_combined, dtype=torch.float)
+    y    = torch.tensor(Y, dtype=torch.long)
+    data = Data(x=x, edge_index=edge_index, y=y)
+    logger.info("PyG Data: %s", data)
+    return data
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Cell 11: Train/test split masks
+# ══════════════════════════════════════════════════════════════════════════════
+def apply_masks(data, Y):
+    indices = list(range(len(Y)))
+    train_idx, test_idx = train_test_split(
+        indices, test_size=0.2, random_state=42, stratify=Y
+    )
+    train_mask = torch.zeros(len(Y), dtype=torch.bool)
+    test_mask  = torch.zeros(len(Y), dtype=torch.bool)
+    train_mask[train_idx] = True
+    test_mask[test_idx]   = True
+    data.train_mask = train_mask
+    data.test_mask  = test_mask
+    return data
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Cell 12: Model definition
+# ══════════════════════════════════════════════════════════════════════════════
+class GNN_RAG_Model(nn.Module):
+    def __init__(self, in_channels, hidden_channels, num_classes):
+        super().__init__()
+        self.conv1      = SAGEConv(in_channels, hidden_channels)
+        self.bn1        = nn.BatchNorm1d(hidden_channels)
+        self.conv2      = SAGEConv(hidden_channels, hidden_channels)
+        self.bn2        = nn.BatchNorm1d(hidden_channels)
+        self.conv3      = SAGEConv(hidden_channels, hidden_channels)
+        self.bn3        = nn.BatchNorm1d(hidden_channels)
+        self.fusion     = nn.Linear(hidden_channels, hidden_channels)
+        self.classifier = nn.Linear(hidden_channels, num_classes)
+
+    def encode(self, x, edge_index):
+        h = F.relu(self.bn1(self.conv1(x, edge_index)))
+        h = F.dropout(h, p=DROPOUT, training=self.training)
+        h = F.relu(self.bn2(self.conv2(h, edge_index)))
+        h = F.dropout(h, p=DROPOUT, training=self.training)
+        h = F.relu(self.bn3(self.conv3(h, edge_index)))
+        h = F.relu(self.fusion(h))
+        return h
+
+    def forward(self, x, edge_index):
+        h = self.encode(x, edge_index)
+        return self.classifier(h)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Cells 13-16: Build model, train, evaluate, save weights
+# ══════════════════════════════════════════════════════════════════════════════
+def train_and_save(data, num_classes):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    logger.info("Using device: %s", device)
+
+    model = GNN_RAG_Model(
+        in_channels=data.num_features,
+        hidden_channels=HIDDEN_DIM,
+        num_classes=num_classes,
+    ).to(device)
+
+    data      = data.to(device)
+    optimizer = torch.optim.Adam(model.parameters(), lr=LR, weight_decay=WD)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode="min", factor=0.5, patience=50
+    )
+
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    best_acc = 0.0
+
+    # ── Training loop (Cell 14) ───────────────────────────────────────────────
+    for epoch in range(EPOCHS):
+        model.train()
+        optimizer.zero_grad()
+        out  = model(data.x, data.edge_index)
+        loss = F.cross_entropy(out[data.train_mask], data.y[data.train_mask])
+        loss.backward()
+        optimizer.step()
+        scheduler.step(loss)
+
+        if epoch % 10 == 0:
+            model.eval()
+            with torch.no_grad():
+                out  = model(data.x, data.edge_index)
+                pred = out.argmax(dim=1)
+                acc  = (
+                    (pred[data.test_mask] == data.y[data.test_mask]).sum().item()
+                    / data.test_mask.sum().item()
+                )
+            logger.info(
+                "Epoch %4d | Loss: %.4f | LR: %.6f | Val Acc: %.4f",
+                epoch, loss.item(), optimizer.param_groups[0]["lr"], acc,
+            )
+            # Save best checkpoint
+            if acc > best_acc:
+                best_acc = acc
+                torch.save(model.state_dict(), f"{OUTPUT_DIR}/best.pth")
+
+    # ── Cell 15: Final test accuracy ──────────────────────────────────────────
+    model.load_state_dict(torch.load(f"{OUTPUT_DIR}/best.pth"))
+    model.eval()
+    with torch.no_grad():
+        out  = model(data.x, data.edge_index)
+        pred = out.argmax(dim=1)
+        test_acc = (
+            (pred[data.test_mask] == data.y[data.test_mask]).sum().item()
+            / data.test_mask.sum().item()
+        )
+    logger.info("Test Accuracy: %.4f", test_acc)
+
+    # ── Cell 16: Train + test accuracy breakdown ──────────────────────────────
+    with torch.no_grad():
+        train_acc = (
+            (pred[data.train_mask] == data.y[data.train_mask]).sum().item()
+            / data.train_mask.sum().item()
+        )
+    logger.info("Train Acc: %.4f | Test Acc: %.4f", train_acc, test_acc)
+
+    # ── Save final weights (mirrors train_facebook.py) ────────────────────────
+    torch.save(model.state_dict(), f"{OUTPUT_DIR}/model_weights_facebook.pth")
+    logger.info("Saved model_weights_facebook.pth")
+
+    # ── Save embeddings ───────────────────────────────────────────────────────
+    with torch.no_grad():
+        embeddings = model.encode(data.x, data.edge_index)
+    np.save(f"{OUTPUT_DIR}/embeddings_facebook.npy", embeddings.cpu().numpy())
+    logger.info("Saved embeddings_facebook.npy")
+
     print("Training successfully completed!")
-    
-if __name__=="__main__": 
-    train()
+    print(f"  Best Val Acc : {best_acc:.4f}")
+    print(f"  Train Acc    : {train_acc:.4f}")
+    print(f"  Test  Acc    : {test_acc:.4f}")
+    print(f"  Weights      : {OUTPUT_DIR}/model_weights_facebook.pth")
+    print(f"  Embeddings   : {OUTPUT_DIR}/embeddings_facebook.npy")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Main
+# ══════════════════════════════════════════════════════════════════════════════
+def main():
+    # Cell 2
+    download_and_extract()
+
+    # Cell 3
+    edges_path, features_path, target_path = get_paths()
+
+    # Cell 4
+    edges = load_edges(edges_path)
+
+    # Cell 5
+    nodes, Y, le = load_labels(target_path)
+
+    # Cell 6
+    X, node_to_idx = build_onehot_features(features_path, nodes)
+
+    # Cell 7
+    documents = build_documents(nodes)
+
+    # Cell 8
+    text_embeddings = encode_text(documents)
+
+    # Cell 9
+    edge_index = build_edge_index(edges, node_to_idx)
+
+    # Cell 10
+    data = build_data(X, text_embeddings, edge_index, Y)
+
+    # Cell 11
+    data = apply_masks(data, Y)
+
+    # Cells 13-16
+    train_and_save(data, num_classes=len(set(Y)))
+
+
+if __name__ == "__main__":
+    main()
