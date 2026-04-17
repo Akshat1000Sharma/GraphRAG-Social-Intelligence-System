@@ -14,9 +14,9 @@ A production-ready social network intelligence system combining:
 ## Architecture Overview
 
 ```
-User Query
-    │
-    ▼
+     User Query
+         │
+         ▼
 ┌─────────────────┐
 │  Query Analyzer │  ← Parse intent, extract entities, pick strategy
 └────────┬────────┘
