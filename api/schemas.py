@@ -1,49 +1,18 @@
 """
-API Schemas: Pydantic models for request/response validation.
+api/schemas.py  (EXTENDED with chat, insert, dataset endpoints)
 """
+from typing import Any, Dict, List, Literal, Optional
+from pydantic import BaseModel, Field, field_validator
+import re
 
-from typing import Any, Dict, List, Optional
-from pydantic import BaseModel, Field
-
-
-# ─── Request Models ────────────────────────────────────────────────────────────
-
-class NLQueryRequest(BaseModel):
-    query: str = Field(..., min_length=3, max_length=1000, description="Natural language query")
-    user_id: Optional[str] = Field(None, description="Optional user context")
-    mode: Optional[str] = Field("hybrid", description="Retrieval mode: hybrid | graph | vector")
-    top_k: int = Field(default=10, ge=1, le=50)
-
-    model_config = {"json_schema_extra": {
-        "example": {
-            "query": "Who are the top influencers in the tech community?",
-            "user_id": "user_1",
-            "mode": "hybrid",
-            "top_k": 10,
-        }
-    }}
-
-
-class LinkPredictionRequest(BaseModel):
-    user_id: str = Field(..., description="Source user for prediction")
-    pairs: Optional[List[List[str]]] = Field(
-        None, description="Explicit pairs to score: [['user_1', 'user_2'], ...]"
-    )
-    top_k: int = Field(default=10, ge=1, le=50)
-
-    model_config = {"json_schema_extra": {
-        "example": {"user_id": "user_1", "top_k": 10}
-    }}
-
-
-# ─── Response Models ───────────────────────────────────────────────────────────
+VALID_DATASETS = ["facebook", "twitter", "reddit", "demo", "all"]
+VALID_MODES    = ["hybrid", "graph", "vector"]
 
 class ValidationInfo(BaseModel):
     is_valid: bool
     confidence: float
     warnings: List[str] = []
     issues: List[str] = []
-
 
 class PipelineTiming(BaseModel):
     analyzer: float
@@ -54,7 +23,6 @@ class PipelineTiming(BaseModel):
     validator: float
     total: float
 
-
 class BaseGraphResponse(BaseModel):
     intent: str
     query: str
@@ -64,25 +32,8 @@ class BaseGraphResponse(BaseModel):
     graph_context: str = ""
     retrieval_mode: str
     sources: List[str] = []
-    validation: ValidationInfo
+    validation: Optional[ValidationInfo] = None
     pipeline_timing_ms: Optional[PipelineTiming] = None
-
-
-class FriendRecommendationResponse(BaseGraphResponse):
-    pass
-
-
-class TrendingPostsResponse(BaseGraphResponse):
-    pass
-
-
-class InfluenceResponse(BaseGraphResponse):
-    user_stats: Optional[Dict[str, Any]] = None
-
-
-class ConnectionExplanationResponse(BaseGraphResponse):
-    common_friends: List[Dict[str, Any]] = []
-
 
 class HealthResponse(BaseModel):
     status: str
@@ -91,3 +42,125 @@ class HealthResponse(BaseModel):
     gnn_datasets: List[str]
     pipeline_ready: bool
     version: str
+    dataset_counts: Optional[Dict[str, Dict]] = None
+
+class DatasetStatus(BaseModel):
+    name: str
+    on_disk: bool
+    files: Dict[str, bool] = {}
+    last_ingest: Optional[str] = None
+    ingest_version: Optional[str] = None
+    neo4j_counts: Optional[Dict[str, int]] = None
+
+class DatasetsStatusResponse(BaseModel):
+    datasets: Dict[str, DatasetStatus]
+    neo4j_connected: bool
+
+class IngestResponse(BaseModel):
+    triggered: List[str]
+    results: Dict[str, Any]
+
+class ChatRequest(BaseModel):
+    """R4: NL question over Neo4j graph data."""
+    message: str = Field(..., min_length=1, max_length=2000)
+    dataset: Optional[str] = Field(default="all")
+    session_id: Optional[str] = None
+    mode: Optional[str] = Field(default="hybrid")
+    top_k: int = Field(default=10, ge=1, le=50)
+    user_id: Optional[str] = None
+
+    @field_validator("dataset")
+    @classmethod
+    def validate_dataset(cls, v):
+        if v and v not in VALID_DATASETS:
+            raise ValueError(f"dataset must be one of {VALID_DATASETS}")
+        return v or "all"
+
+    @field_validator("mode")
+    @classmethod
+    def validate_mode(cls, v):
+        if v and v not in VALID_MODES:
+            raise ValueError(f"mode must be one of {VALID_MODES}")
+        return v or "hybrid"
+
+    model_config = {"json_schema_extra": {"example": {
+        "message": "Who are the most influential users in the facebook dataset?",
+        "dataset": "facebook", "mode": "hybrid", "top_k": 10,
+    }}}
+
+class ChatResponse(BaseModel):
+    message: str
+    dataset_queried: str
+    mode: str
+    intent: str
+    results: List[Dict[str, Any]] = []
+    insight: str = ""
+    datasets_cited: List[str] = []
+    graph_context_summary: str = ""
+    pipeline_timing_ms: Optional[Dict[str, float]] = None
+    session_id: Optional[str] = None
+
+class InsertUserRequest(BaseModel):
+    dataset: str = Field(...)
+    name: str = Field(..., min_length=1, max_length=200)
+    bio: Optional[str] = Field(default="", max_length=1000)
+    source_id: Optional[str] = None
+    follower_count: int = Field(default=0, ge=0)
+    influence_score: float = Field(default=0.3, ge=0.0, le=1.0)
+
+    @field_validator("dataset")
+    @classmethod
+    def validate_dataset(cls, v):
+        allowed = ["facebook", "twitter", "reddit", "demo"]
+        if v not in allowed:
+            raise ValueError(f"dataset must be one of {allowed}")
+        return v
+
+    @field_validator("name")
+    @classmethod
+    def sanitize_name(cls, v):
+        return re.sub(r'[\x00-\x1f\x7f]', '', v).strip()
+
+class InsertEdgeRequest(BaseModel):
+    dataset: str
+    from_user_id: str
+    to_user_id: str
+    rel_type: Literal["FRIEND", "FOLLOWS", "LIKED"] = Field(default="FRIEND")
+    bidirectional: bool = Field(default=True)
+
+class InsertPostRequest(BaseModel):
+    dataset: str
+    author_source_id: str
+    title: str = Field(..., min_length=1, max_length=500)
+    content: str = Field(default="", max_length=5000)
+    topic: str = Field(default="general")
+    source_id: Optional[str] = None
+
+    @field_validator("dataset")
+    @classmethod
+    def validate_dataset(cls, v):
+        if v not in ["facebook", "twitter", "reddit", "demo"]:
+            raise ValueError("dataset must be one of: facebook, twitter, reddit, demo")
+        return v
+
+class NLInsertRequest(BaseModel):
+    """R5: Natural language insert command."""
+    nl_command: str = Field(..., min_length=5, max_length=2000)
+    dataset: Optional[str] = None
+    confirm: bool = Field(default=False)
+
+    model_config = {"json_schema_extra": {"example": {
+        "nl_command": "Add user Alice who is friends with Bob in the facebook dataset",
+        "confirm": True,
+    }}}
+
+class InsertResult(BaseModel):
+    ok: bool
+    operation: str
+    nodes_created: int = 0
+    edges_created: int = 0
+    cypher_summary: str = ""
+    detail: Optional[Dict[str, Any]] = None
+    error: Optional[str] = None
+    requires_confirm: bool = False
+    preview: Optional[Dict[str, Any]] = None

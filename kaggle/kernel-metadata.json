@@ -1,0 +1,14 @@
+{
+  "id": "YOUR_KAGGLE_USERNAME/graphrag-pipeline-accuracy",
+  "title": "GraphRAG pipeline accuracy",
+  "code_file": "run_pipeline_test.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": "true",
+  "enable_gpu": "true",
+  "enable_internet": "true",
+  "dataset_sources": ["rozemberczki/musae-facebook-pagepage-network"],
+  "competition_sources": [],
+  "kernel_sources": [],
+  "model_sources": []
+}

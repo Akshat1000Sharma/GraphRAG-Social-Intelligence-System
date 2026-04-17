@@ -7,6 +7,8 @@ import time
 import logging
 from typing import Any, Dict, Optional
 
+from rag.hybrid_retrieval import RetrievalMode
+
 from api.agents.analyzer import QueryAnalyzerAgent, AnalyzedQuery
 from api.agents.router import RouterAgent
 from api.agents.retrievers import RetrieversAgent
@@ -63,6 +65,14 @@ class MultiAgentPipeline:
         # ── Step 2: Route query ──
         t2 = time.time()
         query_type, params, mode = self.router.route(analyzed, None)
+        # Honor explicit retrieval mode from API (/chat, /query context)
+        req_mode = (context.get("mode") or "").strip().lower()
+        if req_mode == "graph":
+            mode = RetrievalMode.GRAPH
+        elif req_mode == "vector":
+            mode = RetrievalMode.VECTOR
+        elif req_mode == "hybrid":
+            mode = RetrievalMode.HYBRID
         t2_elapsed = (time.time() - t2) * 1000
 
         # ── Step 3: Execute retrieval ──

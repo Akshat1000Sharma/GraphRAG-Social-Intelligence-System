@@ -12,10 +12,28 @@ from neo4j.exceptions import ServiceUnavailable, AuthError
 
 logger = logging.getLogger(__name__)
 
-NEO4J_URI = os.getenv("NEO4J_URI", "bolt://localhost:7687")
-NEO4J_USER = os.getenv("NEO4J_USER", "neo4j")
-NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD", "password123")
-NEO4J_DATABASE = os.getenv("NEO4J_DATABASE", "neo4j")
+
+def _neo4j_uri() -> str:
+    return os.getenv("NEO4J_URI", "bolt://localhost:7687")
+
+
+def _neo4j_user() -> str:
+    return os.getenv("NEO4J_USER", "neo4j")
+
+
+def _neo4j_password() -> str:
+    return os.getenv("NEO4J_PASSWORD", "password123")
+
+
+def _neo4j_database() -> str:
+    return os.getenv("NEO4J_DATABASE", "neo4j")
+
+
+# Legacy exports (values fixed at import time; prefer Neo4jClient() which re-reads env)
+NEO4J_URI = _neo4j_uri()
+NEO4J_USER = _neo4j_user()
+NEO4J_PASSWORD = _neo4j_password()
+NEO4J_DATABASE = _neo4j_database()
 
 
 class Neo4jClient:
@@ -26,10 +44,15 @@ class Neo4jClient:
     _instance: Optional["Neo4jClient"] = None
     _driver: Optional[Driver] = None
 
-    def __init__(self, uri: str = NEO4J_URI, user: str = NEO4J_USER, password: str = NEO4J_PASSWORD):
-        self.uri = uri
-        self.user = user
-        self.password = password
+    def __init__(
+        self,
+        uri: Optional[str] = None,
+        user: Optional[str] = None,
+        password: Optional[str] = None,
+    ):
+        self.uri = uri if uri is not None else _neo4j_uri()
+        self.user = user if user is not None else _neo4j_user()
+        self.password = password if password is not None else _neo4j_password()
         self._connected = False
 
     def connect(self) -> bool:
@@ -59,10 +82,11 @@ class Neo4jClient:
         return self._connected and self._driver is not None
 
     @contextmanager
-    def session(self, database: str = NEO4J_DATABASE):
+    def session(self, database: Optional[str] = None):
+        db = database if database is not None else _neo4j_database()
         if not self.is_connected:
             self.connect()
-        session = self._driver.session(database=database)
+        session = self._driver.session(database=db)
         try:
             yield session
         finally:
@@ -72,12 +96,13 @@ class Neo4jClient:
         self,
         query: str,
         params: Optional[Dict[str, Any]] = None,
-        database: str = NEO4J_DATABASE,
+        database: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """Execute a Cypher query and return results as list of dicts."""
         if not self.is_connected:
             self.connect()
-        with self.session(database) as session:
+        db = database if database is not None else _neo4j_database()
+        with self.session(db) as session:
             result = session.run(query, params or {})
             return [dict(record) for record in result]
 

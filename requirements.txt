@@ -44,3 +44,6 @@ rich==13.7.0
 # ─── Dev / Testing ─────────────────────────────────────────────────────────────
 pytest==7.4.3
 pytest-asyncio==0.21.1
+
+# Optional: Kaggle CLI — python scripts/push_kaggle_kernel.py (uses KAGGLE_* from .env)
+# kaggle>=1.6.0

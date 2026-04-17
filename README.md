@@ -14,42 +14,42 @@ A production-ready social network intelligence system combining:
 ## Architecture Overview
 
 ```
-      User Query
-          │
+User Query
+    │
+    ▼
+┌─────────────────┐
+│  Query Analyzer │  ← Parse intent, extract entities, pick strategy
+└────────┬────────┘
+         │
+         ▼
+┌─────────────────┐
+│  Router Agent   │  ← Map intent → query_type + retrieval mode
+└────────┬────────┘
+         │
+    ┌────┴────┐
+    ▼         ▼
+┌────────┐ ┌────────┐
+│ Graph  │ │ Vector │  ← Cypher (Neo4j) + Embedding similarity (FAISS)
+│Retriev │ │Retriev │
+└────┬───┘ └───┬────┘
+     └────┬────┘
+          │ Reciprocal Rank Fusion
           ▼
-  ┌─────────────────┐
-  │  Query Analyzer │  ← Parse intent, extract entities, pick strategy
-  └────────┬────────┘
-           │
-           ▼
-  ┌─────────────────┐
-  │  Router Agent   │  ← Map intent → query_type + retrieval mode
-  └────────┬────────┘
-           │
-      ┌────┴────┐
-      ▼         ▼
- ┌────────┐ ┌────────┐
- │ Graph  │ │ Vector │  ← Cypher (Neo4j) + Embedding similarity (FAISS)
- │Retriev │ │Retriev │
- └────┬───┘ └───┬────┘
-      └────┬────┘
-           │ Reciprocal Rank Fusion
-           ▼
-  ┌──────────────────┐
-  │ GNN Inference    │  ← Link prediction / Node classification (CPU)
-  └────────┬─────────┘
-           │
-           ▼
-  ┌──────────────────┐
-  │  Synthesizer     │  ← KAG: merge GNN + RAG context → LLM prompt
-  └────────┬─────────┘
-           │
-           ▼
-  ┌──────────────────┐
-  │  Validator       │  ← Grounding checks, deduplication, confidence
-  └────────┬─────────┘
-           │
-           ▼
+┌──────────────────┐
+│ GNN Inference    │  ← Link prediction / Node classification (CPU)
+└────────┬─────────┘
+         │
+         ▼
+┌──────────────────┐
+│  Synthesizer     │  ← KAG: merge GNN + RAG context → LLM prompt
+└────────┬─────────┘
+         │
+         ▼
+┌──────────────────┐
+│  Validator       │  ← Grounding checks, deduplication, confidence
+└────────┬─────────┘
+         │
+         ▼
    Structured JSON Response
    + Natural Language Insight
 ```

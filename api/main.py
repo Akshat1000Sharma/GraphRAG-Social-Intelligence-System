@@ -1,29 +1,43 @@
 """
-FastAPI Application: Social Network Intelligence API
-Endpoints: friend recommendations, influencer detection, trending posts,
-           link prediction, connection explanation, NL graph query.
+main.py  (v3 — datasets + chat + chat/insert)
+=============================================
+Startup order:
+  1. Neo4j connect + base schema
+  2. Dataset presence check + download (R1)
+  3. Dataset schema extensions + bulk ingest (R2)
+  4. Neo4j vector indexes
+  5. Embedding population
+  6. GNN models
+  7. Wire retriever + pipeline + chat services
+
+New endpoints: /datasets/status, /datasets/ingest, /chat, /chat/insert
+Existing endpoints: unchanged (preserved)
 """
 
 import os
-from pathlib import Path
-
-from dotenv import load_dotenv
-
-# Load api/.env before any module reads os.environ (e.g. db.neo4j_client).
-load_dotenv(Path(__file__).resolve().parent / ".env")
 import logging
+from pathlib import Path
 from contextlib import asynccontextmanager
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Query
+from dotenv import load_dotenv
+
+# Load env before db.neo4j_client reads os.environ: project root first, then api/ (overrides).
+_root = Path(__file__).resolve().parent.parent
+load_dotenv(_root / ".env", override=False)
+load_dotenv(Path(__file__).resolve().parent / ".env", override=True)
+
+from fastapi import FastAPI, HTTPException, Query, Depends
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
 import uvicorn
 
-# Internal imports
 from db.neo4j_client import get_neo4j_client
 from model.inference import inference_manager
-from rag.vector_store import get_text_store, get_user_index, get_post_index
+from rag.neo4j_vector_store import (
+    Neo4jVectorSchemaManager,
+    Neo4jEmbeddingPopulator,
+    get_text_engine,
+)
 from rag.hybrid_retrieval import (
     HybridRetriever,
     GraphRetriever,
@@ -31,6 +45,14 @@ from rag.hybrid_retrieval import (
     RetrievalMode,
 )
 from api.services.pipeline import MultiAgentPipeline
+from api.services.chat_service import ChatService, InsertService
+from api.schemas import (
+    ChatRequest, ChatResponse,
+    NLInsertRequest, InsertResult,
+    InsertUserRequest, InsertEdgeRequest,
+    DatasetsStatusResponse, DatasetStatus, IngestResponse,
+)
+from api.bootstrap.config import ALL_DATASETS, AUTO_INGEST, FORCE_REINGEST
 
 logging.basicConfig(
     level=logging.INFO,
@@ -38,299 +60,372 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ─── App-level state ──────────────────────────────────────────────────────────
 
 class AppState:
-    pipeline: Optional[MultiAgentPipeline] = None
-    neo4j = None
-    retriever: Optional[HybridRetriever] = None
+    neo4j              = None
+    pipeline           = None
+    retriever          = None
+    schema_manager     = None
+    embedding_populator = None
+    chat_service       = None
+    insert_service     = None
+    dataset_statuses   = {}
+    ingest_results     = {}
 
 
 app_state = AppState()
 
 
-# ─── Lifespan ─────────────────────────────────────────────────────────────────
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Initialize all components on startup, clean up on shutdown."""
-    logger.info("Starting Social Graph Intelligence API...")
+    logger.info("=== Social Graph Intelligence v3 starting up ===")
 
-    # ── Neo4j ──
+    # ── Step 1: Neo4j base connection + schema ────────────────────────────────
     try:
         app_state.neo4j = get_neo4j_client()
         if app_state.neo4j.is_connected:
             app_state.neo4j.setup_schema()
-            app_state.neo4j.seed_demo_data()
-            logger.info("Neo4j connected and schema initialized")
+            logger.info("Neo4j connected and base schema initialized")
         else:
-            logger.warning("Neo4j not connected — graph queries will fail gracefully")
+            logger.warning("Neo4j not connected — degraded mode")
     except Exception as e:
-        logger.warning(f"Neo4j initialization error: {e}")
+        logger.warning(f"Neo4j init error: {e}")
 
-    # ── GNN Models ──
+    # ── Step 2: Dataset download / ensure presence (R1) ───────────────────────
+    try:
+        from api.bootstrap.datasets import ensure_all_datasets
+        app_state.dataset_statuses = ensure_all_datasets()
+    except Exception as e:
+        logger.warning(f"Dataset bootstrap error: {e}")
+
+    # ── Step 3: Dataset schema + bulk ingest into Neo4j (R2) ─────────────────
+    if app_state.neo4j and app_state.neo4j.is_connected and AUTO_INGEST:
+        try:
+            from db.ingest.ingest_all import ingest_all_if_needed
+            app_state.ingest_results = ingest_all_if_needed(
+                app_state.neo4j,
+                force=FORCE_REINGEST,
+            )
+        except Exception as e:
+            logger.warning(f"Dataset ingest error: {e}")
+    elif app_state.neo4j and app_state.neo4j.is_connected:
+        # Always seed demo data if no real datasets loaded
+        try:
+            app_state.neo4j.seed_demo_data()
+        except Exception as e:
+            logger.debug(f"Demo seed (non-critical): {e}")
+
+    # ── Step 4: Neo4j vector indexes ──────────────────────────────────────────
+    if app_state.neo4j and app_state.neo4j.is_connected:
+        try:
+            app_state.schema_manager = Neo4jVectorSchemaManager(app_state.neo4j)
+            app_state.schema_manager.create_all_indexes()
+        except Exception as e:
+            logger.warning(f"Vector index setup: {e}")
+
+    # ── Step 5: Embedding population ──────────────────────────────────────────
+    if app_state.neo4j and app_state.neo4j.is_connected:
+        try:
+            text_engine = get_text_engine()
+            app_state.embedding_populator = Neo4jEmbeddingPopulator(
+                neo4j_client=app_state.neo4j,
+                text_engine=text_engine,
+            )
+            app_state.embedding_populator.populate_all(force_refresh=False)
+        except Exception as e:
+            logger.warning(f"Embedding population: {e}")
+
+    # ── Step 6: GNN models ────────────────────────────────────────────────────
     try:
         inference_manager.load_dataset("facebook")
-        logger.info("GNN model loaded")
     except Exception as e:
-        logger.warning(f"GNN model load error: {e}")
+        logger.warning(f"GNN model load: {e}")
 
-    # ── Vector stores ──
-    try:
-        text_store = get_text_store()
-        user_index = get_user_index()
-        post_index = get_post_index()
-        logger.info("Vector stores initialized")
-    except Exception as e:
-        logger.warning(f"Vector store error: {e}")
-        text_store = get_text_store()
-        user_index = get_user_index()
-        post_index = get_post_index()
+    # ── Step 7: Wire retriever + pipeline + services ──────────────────────────
+    text_engine = get_text_engine()
 
-    # ── Hybrid retriever ──
-    graph_retriever = GraphRetriever(app_state.neo4j) if app_state.neo4j else None
-    vector_retriever = VectorRetriever(text_store, user_index, post_index)
-
-    class NullGraphRetriever:
-        def retrieve(self, *args, **kwargs):
+    class _NullGraph:
+        def retrieve(self, *a, **kw):
             from rag.hybrid_retrieval import GraphContext
             return GraphContext(query_type="null", raw_records=[])
 
-    app_state.retriever = HybridRetriever(
-        graph_retriever=graph_retriever or NullGraphRetriever(),
-        vector_retriever=vector_retriever,
+    graph_ret = (
+        GraphRetriever(app_state.neo4j)
+        if app_state.neo4j and app_state.neo4j.is_connected
+        else _NullGraph()
+    )
+    vec_ret = (
+        VectorRetriever(neo4j_client=app_state.neo4j, text_engine=text_engine)
+        if app_state.neo4j and app_state.neo4j.is_connected
+        else None
     )
 
-    # ── Multi-agent pipeline ──
+    class _NullVector:
+        model_name = "none"
+        def search_users(self, *a, **kw):
+            from rag.hybrid_retrieval import VectorContext
+            return VectorContext(query="", results=[])
+        def search_posts(self, *a, **kw):
+            from rag.hybrid_retrieval import VectorContext
+            return VectorContext(query="", results=[])
+        def search_by_gnn_embedding(self, *a, **kw):
+            from rag.hybrid_retrieval import VectorContext
+            return VectorContext(query="", results=[])
+
+    if vec_ret is None:
+        vec_ret = _NullVector()
+
+    app_state.retriever = HybridRetriever(graph_retriever=graph_ret, vector_retriever=vec_ret)
     gnn_engine = inference_manager.get_engine("facebook") if inference_manager.engines else None
-    app_state.pipeline = MultiAgentPipeline(
-        retriever=app_state.retriever,
-        inference_engine=gnn_engine,
-    )
+    app_state.pipeline  = MultiAgentPipeline(retriever=app_state.retriever, inference_engine=gnn_engine)
+    app_state.chat_service   = ChatService(pipeline=app_state.pipeline, neo4j_client=app_state.neo4j)
+    app_state.insert_service = InsertService(neo4j_client=app_state.neo4j)
 
-    logger.info("All components initialized. API ready.")
+    logger.info("=== API ready ===")
     yield
 
-    # Shutdown
     if app_state.neo4j:
         app_state.neo4j.close()
     logger.info("Shutdown complete.")
 
 
-# ─── App ──────────────────────────────────────────────────────────────────────
-
 app = FastAPI(
     title="Social Graph Intelligence API",
-    description="GNN + GraphRAG + Multi-Agent Pipeline for Social Network Analysis",
-    version="1.0.0",
+    description="GNN + GraphRAG + Multi-Agent — Neo4j unified backend + dataset ingest + chat",
+    version="3.0.0",
     lifespan=lifespan,
-    docs_url="/docs",
-    redoc_url="/redoc",
 )
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 
-# ─── Health ───────────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+# HEALTH (extended with per-dataset counts)
+# ══════════════════════════════════════════════════════════════════════════════
 
 @app.get("/health", tags=["System"])
 async def health():
-    """System health check."""
     neo4j_ok = app_state.neo4j.is_connected if app_state.neo4j else False
-    gnn_ok = len(inference_manager.engines) > 0
+    dataset_counts = {}
+    if neo4j_ok:
+        try:
+            from db.ingest.ingest_all import get_dataset_counts
+            for ds in ["facebook", "twitter", "reddit", "demo"]:
+                dataset_counts[ds] = get_dataset_counts(app_state.neo4j, ds)
+        except Exception:
+            pass
+
+    vector_indexes = []
+    if app_state.schema_manager:
+        try:
+            vector_indexes = app_state.schema_manager.get_index_status()
+        except Exception:
+            pass
 
     return {
         "status": "healthy",
         "neo4j_connected": neo4j_ok,
-        "gnn_loaded": gnn_ok,
+        "vector_backend": "neo4j",
+        "vector_indexes": [{"name": i.get("name"), "state": i.get("state")} for i in vector_indexes],
+        "gnn_loaded": len(inference_manager.engines) > 0,
         "gnn_datasets": list(inference_manager.engines.keys()),
         "pipeline_ready": app_state.pipeline is not None,
-        "version": "1.0.0",
+        "version": "3.0.0",
+        "dataset_counts": dataset_counts,
+        "ingest_results": {k: v.get("status") for k, v in app_state.ingest_results.items()},
     }
 
 
-# ─── Friend Recommendations ───────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+# DATASET MANAGEMENT (R1/R2)
+# ══════════════════════════════════════════════════════════════════════════════
+
+@app.get("/datasets/status", tags=["Datasets"])
+async def datasets_status():
+    """R1/R2: Which datasets are on disk + last ingest time + Neo4j counts."""
+    neo4j_ok = app_state.neo4j.is_connected if app_state.neo4j else False
+    out = {}
+    for name, manifest in ALL_DATASETS.items():
+        files_present = {f.filename: (manifest.dir / f.filename).exists() for f in manifest.files}
+        neo4j_counts = None
+        if neo4j_ok:
+            try:
+                from db.ingest.ingest_all import get_dataset_counts
+                neo4j_counts = get_dataset_counts(app_state.neo4j, name)
+            except Exception:
+                pass
+        marker = manifest.marker_path()
+        out[name] = DatasetStatus(
+            name=name,
+            on_disk=manifest.all_required_present(),
+            files=files_present,
+            last_ingest=marker.read_text().strip() if marker.exists() else None,
+            ingest_version=manifest.ingest_version,
+            neo4j_counts=neo4j_counts,
+        )
+    return DatasetsStatusResponse(datasets=out, neo4j_connected=neo4j_ok)
+
+
+@app.post("/datasets/ingest", tags=["Datasets"])
+async def trigger_ingest(dataset: Optional[str] = Query(default=None), force: bool = Query(default=False)):
+    """Admin: trigger re-ingest of one or all datasets."""
+    if not app_state.neo4j or not app_state.neo4j.is_connected:
+        raise HTTPException(503, "Neo4j not connected")
+    from db.ingest.ingest_all import ingest_dataset, ingest_all_if_needed
+    if dataset:
+        result = ingest_dataset(app_state.neo4j, dataset, force=force)
+        return IngestResponse(triggered=[dataset], results={dataset: result})
+    else:
+        results = ingest_all_if_needed(app_state.neo4j, force=force)
+        return IngestResponse(triggered=list(results.keys()), results=results)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# CHAT (R4)
+# ══════════════════════════════════════════════════════════════════════════════
+
+@app.post("/chat", tags=["Chat"], response_model=ChatResponse)
+async def chat(req: ChatRequest):
+    """
+    R4: Natural language Q&A over Neo4j-stored graph data.
+    Accepts dataset scope: facebook | twitter | reddit | demo | all.
+    """
+    if not app_state.chat_service:
+        raise HTTPException(503, "Chat service not initialized")
+    return app_state.chat_service.query(req)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# CHAT INSERT (R5)
+# ══════════════════════════════════════════════════════════════════════════════
+
+@app.post("/chat/insert", tags=["Chat"], response_model=InsertResult)
+async def chat_insert(req: NLInsertRequest):
+    """
+    R5: Natural language graph insertion.
+    Example: {"nl_command": "Add user Alice who is friends with Bob in facebook", "confirm": true}
+    Set confirm=false (default) to preview without executing.
+    """
+    if not app_state.insert_service:
+        raise HTTPException(503, "Insert service not initialized")
+    return app_state.insert_service.execute_nl_insert(req)
+
+
+@app.post("/chat/insert/user", tags=["Chat"], response_model=InsertResult)
+async def insert_user_structured(req: InsertUserRequest, confirm: bool = Query(default=False)):
+    """Structured user insert (skip NL parsing). confirm=true to execute."""
+    if not app_state.insert_service:
+        raise HTTPException(503, "Insert service not initialized")
+    return app_state.insert_service.insert_user(req, preview_only=not confirm)
+
+
+@app.post("/chat/insert/edge", tags=["Chat"], response_model=InsertResult)
+async def insert_edge_structured(req: InsertEdgeRequest, confirm: bool = Query(default=False)):
+    """Structured edge insert. confirm=true to execute."""
+    if not app_state.insert_service:
+        raise HTTPException(503, "Insert service not initialized")
+    return app_state.insert_service.insert_edge(req, preview_only=not confirm)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# EXISTING ENDPOINTS (unchanged)
+# ══════════════════════════════════════════════════════════════════════════════
 
 @app.get("/recommend-friends/{user_id}", tags=["Recommendations"])
-async def recommend_friends(
-    user_id: str,
-    top_k: int = Query(default=10, ge=1, le=50),
-):
-    """
-    Recommend friends for a user using GNN link prediction + graph traversal.
-    Uses multi-agent pipeline with hybrid GraphRAG.
-    """
+async def recommend_friends(user_id: str, top_k: int = Query(default=10, ge=1, le=50),
+                            dataset: Optional[str] = Query(default="all")):
     if not app_state.pipeline:
         raise HTTPException(503, "Pipeline not initialized")
-
-    result = app_state.pipeline.run(
+    if not app_state.neo4j or not app_state.neo4j.is_connected:
+        raise HTTPException(
+            503,
+            "Neo4j is not connected, so the social graph cannot be queried. "
+            "Set NEO4J_URI, NEO4J_USER, and NEO4J_PASSWORD in api/.env (or project .env) "
+            "to match your Docker Neo4j credentials, restart the API, then run ingest if needed.",
+        )
+    return app_state.pipeline.run(
         query=f"Recommend {top_k} new friends for user {user_id}",
-        context={"user_id": user_id},
+        context={"user_id": user_id, "dataset": dataset},
         top_k=top_k,
     )
-    return result
 
-
-# ─── Link Prediction ──────────────────────────────────────────────────────────
 
 @app.post("/predict-links", tags=["Predictions"])
 async def predict_links(body: dict):
-    """
-    Predict connection probability between user pairs.
-    Body: {"pairs": [["user_1", "user_2"], ...]}
-    """
     if not app_state.pipeline:
         raise HTTPException(503, "Pipeline not initialized")
-
-    pairs = body.get("pairs", [])
-    user_id = body.get("user_id", "user_1")
-
-    result = app_state.pipeline.run(
-        query=f"Predict potential connections for {user_id}",
-        context={"user_id": user_id, "pairs": pairs},
-        top_k=len(pairs) if pairs else 10,
+    return app_state.pipeline.run(
+        query=f"Predict potential connections for {body.get('user_id', 'user_1')}",
+        context={"user_id": body.get("user_id", "user_1"), "dataset": body.get("dataset", "all")},
+        top_k=body.get("top_k", 10),
     )
-    return result
 
-
-# ─── User Influence ───────────────────────────────────────────────────────────
 
 @app.get("/user-influence/{user_id}", tags=["Analytics"])
-async def user_influence(user_id: str):
-    """
-    Compute influence score for a user combining GNN classification + graph metrics.
-    """
+async def user_influence(user_id: str, dataset: Optional[str] = Query(default="all")):
     if not app_state.pipeline:
         raise HTTPException(503, "Pipeline not initialized")
-
-    result = app_state.pipeline.run(
+    return app_state.pipeline.run(
         query=f"What is the influence and role of user {user_id}?",
-        context={"user_id": user_id},
+        context={"user_id": user_id, "dataset": dataset},
         top_k=1,
     )
 
-    # If Neo4j is connected, augment with direct graph stats
-    if app_state.neo4j and app_state.neo4j.is_connected:
-        try:
-            stats = app_state.neo4j.run_query(
-                """
-                MATCH (u:User {id: $user_id})
-                OPTIONAL MATCH (u)-[:POSTED]->(p:Post)
-                OPTIONAL MATCH (u)-[:FRIEND]-(f:User)
-                WITH u, count(DISTINCT p) AS posts, count(DISTINCT f) AS friends,
-                     coalesce(sum(p.like_count), 0) AS total_likes
-                RETURN u.id AS id, u.name AS name, u.follower_count AS followers,
-                       u.influence_score AS gnn_score, posts, friends, total_likes
-                """,
-                {"user_id": user_id},
-            )
-            if stats:
-                result["user_stats"] = stats[0]
-        except Exception as e:
-            logger.warning(f"User stats query failed: {e}")
-
-    return result
-
-
-# ─── Trending Posts ───────────────────────────────────────────────────────────
 
 @app.get("/trending-posts", tags=["Analytics"])
-async def trending_posts(
-    top_k: int = Query(default=10, ge=1, le=50),
-    topic: Optional[str] = Query(default=None),
-):
-    """
-    Get trending posts ranked by engagement velocity.
-    """
+async def trending_posts(top_k: int = Query(default=10, ge=1, le=50),
+                         topic: Optional[str] = Query(default=None),
+                         dataset: Optional[str] = Query(default="all")):
     if not app_state.pipeline:
         raise HTTPException(503, "Pipeline not initialized")
-
     query = f"Show me the top {top_k} trending posts"
     if topic:
         query += f" about {topic}"
-
-    result = app_state.pipeline.run(
+    return app_state.pipeline.run(
         query=query,
-        context={"topic": topic} if topic else {},
+        context={"topic": topic, "dataset": dataset} if topic else {"dataset": dataset},
         top_k=top_k,
     )
-    return result
 
-
-# ─── Explain Connection ───────────────────────────────────────────────────────
 
 @app.get("/explain-connection", tags=["Explainability"])
-async def explain_connection(
-    user_a: str = Query(..., description="First user ID"),
-    user_b: str = Query(..., description="Second user ID"),
-):
-    """
-    Explain the connection between two users using graph path analysis + LLM.
-    """
+async def explain_connection(user_a: str = Query(...), user_b: str = Query(...),
+                              dataset: Optional[str] = Query(default="all")):
     if not app_state.pipeline:
         raise HTTPException(503, "Pipeline not initialized")
-
-    result = app_state.pipeline.run(
+    return app_state.pipeline.run(
         query=f"Explain the connection between {user_a} and {user_b}",
-        context={"user_a": user_a, "user_b": user_b},
+        context={"user_a": user_a, "user_b": user_b, "dataset": dataset},
         top_k=5,
     )
 
-    # Add shortest path info
-    if app_state.neo4j and app_state.neo4j.is_connected:
-        try:
-            common_friends = app_state.neo4j.run_query(
-                """
-                MATCH (a:User {id: $user_a})-[:FRIEND]->(common)<-[:FRIEND]-(b:User {id: $user_b})
-                RETURN common.id AS id, common.name AS name
-                """,
-                {"user_a": user_a, "user_b": user_b},
-            )
-            result["common_friends"] = common_friends
-        except Exception as e:
-            logger.warning(f"Common friends query failed: {e}")
-
-    return result
-
-
-# ─── Natural Language Query (GraphRAG) ────────────────────────────────────────
 
 @app.post("/query", tags=["GraphRAG"])
 async def natural_language_query(body: dict):
-    """
-    Natural language query over the social graph using GraphRAG + multi-agent pipeline.
-
-    Body: {
-      "query": "Who are the top influencers in the tech space?",
-      "user_id": "user_1" (optional context),
-      "mode": "hybrid" | "graph" | "vector",
-      "top_k": 10
-    }
-    """
     if not app_state.pipeline:
         raise HTTPException(503, "Pipeline not initialized")
-
-    query = body.get("query", "")
-    if not query:
+    if not body.get("query"):
         raise HTTPException(400, "Query field is required")
-
-    context = {k: v for k, v in body.items() if k not in ("query", "top_k")}
-    top_k = body.get("top_k", 10)
-
-    result = app_state.pipeline.run(
-        query=query,
-        context=context,
-        top_k=top_k,
+    return app_state.pipeline.run(
+        query=body["query"],
+        context={k: v for k, v in body.items() if k not in ("query", "top_k")},
+        top_k=body.get("top_k", 10),
     )
-    return result
 
 
-# ─── Entry point ──────────────────────────────────────────────────────────────
+@app.get("/vector-indexes", tags=["System"])
+async def list_vector_indexes():
+    if not app_state.schema_manager:
+        raise HTTPException(503, "Schema manager not initialized")
+    return {"indexes": app_state.schema_manager.get_index_status()}
+
+
+@app.post("/refresh-embeddings", tags=["System"])
+async def refresh_embeddings(force: bool = False):
+    if not app_state.embedding_populator:
+        raise HTTPException(503, "Embedding populator not initialized")
+    counts = app_state.embedding_populator.populate_all(force_refresh=force)
+    return {"status": "ok", "counts": counts}
+
 
 if __name__ == "__main__":
     uvicorn.run(

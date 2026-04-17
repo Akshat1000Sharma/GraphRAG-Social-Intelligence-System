@@ -72,7 +72,7 @@ INTENT_PATTERNS = {
     ],
     QueryIntent.USER_PROFILE: [
         r"who is", r"tell.*about.*user", r"user.*info",
-        r"profile.*of", r"about.*person",
+        r"profile.*of", r"about.*person", r"\bbio\b",
     ],
     QueryIntent.CONTENT_SEARCH: [
         r"find.*post", r"search.*post", r"posts.*about",
@@ -177,6 +177,9 @@ class QueryAnalyzerAgent:
             entities["user_b"] = context["user_b"]
         if "post_id" in context:
             entities["post_id"] = context["post_id"]
+        # R3: dataset scoping threaded from context
+        if "dataset" in context:
+            entities["dataset"] = context["dataset"]
 
         # Extract from query text
         # Match "user_X" or "user X" patterns
