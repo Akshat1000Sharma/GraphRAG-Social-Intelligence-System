@@ -4,10 +4,11 @@ testing_pipeline_accuracy.py
 Compares **node classification accuracy** on the Facebook MUSAE graph:
 
 1. **GNN-only** — pretrained `weights/model_weights_facebook.pth` (legacy 3-layer GraphSAGE +
-   classifier, matching the checkpoint that shipped with this repo).
-2. **Pipeline (GNN + graph RAG)** — same logits blended with **train-only** multi-hop
+   classifier; input width is read from the checkpoint, usually 5098 = MUSAE bag-of-features + text).
+2. **Pipeline (GNN + graph RAG)** — GNN logits blended with **train-only** multi-hop
    label propagation (row-normalized adjacency: h₁…h₅ plus a class-frequency prior),
-   analogous to Neo4j neighborhood retrieval. Hyperparameters are tuned on a **validation**
+   analogous to Neo4j neighborhood retrieval, plus optional **text/RAG** vectors (see
+   ``load_musae_facebook``). Hyperparameters are tuned on a **validation**
    slice only, with **vectorized** search over blend weight α and gate (τ, min_conf) for speed
    (typically well under a minute on CPU; faster on GPU if CUDA is available).
 
@@ -26,9 +27,14 @@ set ``PIPELINE_ACCURACY_FAST=1`` for a smaller grid and no fine-tune.
 ``PIPELINE_FINETUNE_PATIENCE`` (default scales with max epochs when unset).
 
 **Pass threshold:** the pipeline test accuracy must exceed ``235/250`` (94%) by default. That
-bar is a regression gate, not a comment on absolute model quality — realistic runs often land
-in the low‑94% range, and CUDA / cudnn nondeterminism can shift results slightly. Optional:
-``PIPELINE_ACCURACY_MIN_ACC=0.93`` (float) to relax only the assertion when reproducing on Kaggle.
+bar is a regression gate. Inputs are matched to the checkpoint (full MUSAE BOW up to the
+first-layer width, optional text-embedding tail) so the GNN sees the same kind of signal it
+was trained on; optional: ``PIPELINE_ACCURACY_MIN_ACC=0.93`` to relax only the assertion.
+
+**Optional text (RAG) vectors:** set ``PIPELINE_FACEBOOK_TEXT_EMB_NPY`` to a ``(num_nodes, D)``
+float32 array whose last ``D`` columns are concatenated after the BOW block (``D`` must equal
+``in_channels − bow_width``). Or place ``musae_facebook_text_tail.npy`` under ``DATA_DIR/facebook/``
+or next to ``weights/``. For debugging only, ``PIPELINE_FEATURE_DIM_CAP`` caps how many BOW columns to use.
 
 Run:
 
@@ -62,7 +68,6 @@ logger = logging.getLogger(__name__)
 SEED = 42
 TEST_SIZE = 0.2
 VAL_FRACTION_OF_TRAIN = 0.15
-FEATURE_DIM_CAP = 128
 WEIGHTS_PATH = Path(__file__).resolve().parent.parent / "weights" / "model_weights_facebook.pth"
 DROPOUT = 0.3
 # Default: pipeline test accuracy must exceed 235/250 + ε (94%). Override with PIPELINE_ACCURACY_MIN_ACC.
@@ -257,6 +262,58 @@ class LegacyFacebookGNN(nn.Module):
         return self.classifier(self.encode(x, edge_index))
 
 
+def _max_bow_columns_for_checkpoint(in_channels: int) -> int:
+    """How many MUSAE bag-of-words columns to use before the optional text/tail block."""
+    cap = in_channels
+    raw = os.getenv("PIPELINE_FEATURE_DIM_CAP", "").strip()
+    if raw:
+        cap = min(cap, int(raw))
+    return cap
+
+
+def _merge_facebook_text_rag_tail(
+    x: torch.Tensor,
+    data_dir: Path,
+    num_nodes: int,
+    bow_width: int,
+    in_channels: int,
+) -> torch.Tensor:
+    """
+    The shipped 5098-d Facebook checkpoint = BOW (first ~4714) + text/RAG tail (e.g. 384-d).
+    If a matching ``(num_nodes, tail)`` array is on disk, fill the tail; otherwise zeros
+    (still far stronger than capping BOW at 128 and zeroing the rest).
+    """
+    tail = in_channels - bow_width
+    if tail <= 0 or x.size(1) != in_channels:
+        return x
+    candidates: list[Path] = []
+    envp = os.getenv("PIPELINE_FACEBOOK_TEXT_EMB_NPY", "").strip()
+    if envp:
+        candidates.append(Path(envp))
+    candidates.append(data_dir / "musae_facebook_text_tail.npy")
+    candidates.append(WEIGHTS_PATH.parent / "musae_facebook_text_tail.npy")
+    path: Path | None = next((p for p in candidates if p.is_file()), None)
+    if path is None:
+        return x
+    try:
+        arr = np.load(path, allow_pickle=False)
+    except OSError as e:
+        logger.warning("Could not load text/RAG tail %s: %s", path, e)
+        return x
+    if tuple(arr.shape) != (num_nodes, tail):
+        logger.warning(
+            "Text/RAG %s: expected shape %s, got %s (keeping zero tail)",
+            path,
+            (num_nodes, tail),
+            tuple(arr.shape),
+        )
+        return x
+    out = x.clone()
+    out[:, bow_width : bow_width + tail] = torch.from_numpy(np.asarray(arr, dtype=np.float32))
+    logger.info("Loaded text/RAG feature tail from %s → columns [%d:%d)", path, bow_width, in_channels)
+    return out
+
+
 def load_musae_facebook(
     data_dir: Path,
     in_channels_required: int,
@@ -309,8 +366,11 @@ def load_musae_facebook(
         for feats in feat_dict.values():
             if feats:
                 max_feat = max(max_feat, max(feats))
-        feat_width = min(max_feat + 1, FEATURE_DIM_CAP)
-        x = torch.zeros(num_nodes, feat_width)
+        # Match checkpoint first-layer width: use full MUSAE BOW up to conv1 in_features (e.g. 5098
+        # total = BOW + text block). Capping BOW at 128 zeroed the tail the model was trained on.
+        bow_max = _max_bow_columns_for_checkpoint(in_channels_required)
+        feat_width = min(max_feat + 1, bow_max)
+        x = torch.zeros(num_nodes, feat_width, dtype=torch.float32)
         for node_id_str, feats in feat_dict.items():
             nid = int(node_id_str)
             if nid >= num_nodes:
@@ -319,9 +379,13 @@ def load_musae_facebook(
                 if fi < feat_width:
                     x[nid, fi] = 1.0
         if feat_width < in_channels_required:
-            x = torch.cat([x, torch.zeros(num_nodes, in_channels_required - feat_width)], dim=1)
+            x = torch.cat(
+                [x, torch.zeros(num_nodes, in_channels_required - feat_width, dtype=torch.float32)],
+                dim=1,
+            )
         elif x.size(1) > in_channels_required:
             x = x[:, :in_channels_required]
+        x = _merge_facebook_text_rag_tail(x, data_dir, num_nodes, feat_width, in_channels_required)
     else:
         from model.utils import build_structural_features
 
