@@ -263,6 +263,31 @@ class TestInsertService:
             params = call_args[0][1] if len(call_args[0]) > 1 else call_args[1]
             assert any(malicious in str(v) for v in params.values())
 
+    def test_insert_post_missing_author(self):
+        from api.schemas import InsertPostRequest
+        svc = self._make_service()
+        svc.neo4j.run_query.return_value = []
+        req = InsertPostRequest(
+            dataset="facebook",
+            author_source_id="nobody",
+            title="T",
+        )
+        result = svc.insert_post(req, preview_only=False)
+        assert result.ok is False
+        assert "source_id" in (result.error or "").lower() or "No User" in (result.error or "")
+
+    def test_insert_post_preview(self):
+        from api.schemas import InsertPostRequest
+        svc = self._make_service()
+        req = InsertPostRequest(
+            dataset="facebook",
+            author_source_id="u1",
+            title="Title",
+        )
+        r = svc.insert_post(req, preview_only=True)
+        assert r.operation == "preview"
+        assert r.requires_confirm is True
+
 
 # ── R3: Dataset filter in retrieval ──────────────────────────────────────────
 

@@ -31,8 +31,10 @@ class GraphQueryService:
         try:
             results = self.db.run_query(
                 """
-                MATCH (u:User {id: $user_id})-[:FRIEND]->(friend)-[:FRIEND]->(fof:User)
-                WHERE fof.id <> $user_id AND NOT (u)-[:FRIEND]->(fof)
+                MATCH (u:User)
+                WHERE (u.id = $user_id OR u.source_id = $user_id)
+                MATCH (u)-[:FRIEND]->(friend)-[:FRIEND]->(fof:User)
+                WHERE fof <> u AND NOT (u)-[:FRIEND]->(fof)
                 WITH fof, count(friend) AS mutual_count
                 ORDER BY mutual_count DESC LIMIT $top_k
                 RETURN fof.id AS id, fof.name AS name,
@@ -90,7 +92,8 @@ class GraphQueryService:
         try:
             results = self.db.run_query(
                 """
-                MATCH (u:User {id: $user_id})
+                MATCH (u:User)
+                WHERE u.id = $user_id OR u.source_id = $user_id
                 OPTIONAL MATCH (u)-[:POSTED]->(p:Post)
                 OPTIONAL MATCH (u)-[:FRIEND]-(f:User)
                 WITH u, count(DISTINCT p) AS posts,
@@ -116,7 +119,11 @@ class GraphQueryService:
     ) -> Dict[str, Any]:
         """Find shortest path and common context between two users."""
         if not self.db or not self.db.is_connected:
-            return {"path": [user_a, "...", user_b], "hops": -1, "common_friends": []}
+            return {
+                "shortest_path": None,
+                "common_friends": [],
+                "common_liked_posts": []
+            }
 
         result: Dict[str, Any] = {}
 
@@ -124,9 +131,10 @@ class GraphQueryService:
         try:
             paths = self.db.run_query(
                 """
-                MATCH path = shortestPath(
-                  (a:User {id: $user_a})-[*..6]-(b:User {id: $user_b})
-                )
+                MATCH (a:User), (b:User)
+                WHERE (a.id = $user_a OR a.source_id = $user_a)
+                  AND (b.id = $user_b OR b.source_id = $user_b)
+                MATCH path = shortestPath((a)-[*..6]-(b))
                 RETURN [n IN nodes(path) | n.name] AS node_names,
                        [r IN relationships(path) | type(r)] AS rel_types,
                        length(path) AS hops
@@ -143,7 +151,10 @@ class GraphQueryService:
         try:
             common = self.db.run_query(
                 """
-                MATCH (a:User {id: $user_a})-[:FRIEND]->(c)<-[:FRIEND]-(b:User {id: $user_b})
+                MATCH (a:User), (b:User)
+                WHERE (a.id = $user_a OR a.source_id = $user_a)
+                  AND (b.id = $user_b OR b.source_id = $user_b)
+                MATCH (a)-[:FRIEND]->(c)<-[:FRIEND]-(b)
                 RETURN c.id AS id, c.name AS name
                 """,
                 {"user_a": user_a, "user_b": user_b},
@@ -157,7 +168,10 @@ class GraphQueryService:
         try:
             common_posts = self.db.run_query(
                 """
-                MATCH (a:User {id: $user_a})-[:LIKED]->(p:Post)<-[:LIKED]-(b:User {id: $user_b})
+                MATCH (a:User), (b:User)
+                WHERE (a.id = $user_a OR a.source_id = $user_a)
+                  AND (b.id = $user_b OR b.source_id = $user_b)
+                MATCH (a)-[:LIKED]->(p:Post)<-[:LIKED]-(b)
                 RETURN p.id AS id, p.title AS title, p.topic AS topic
                 LIMIT 5
                 """,
@@ -181,8 +195,10 @@ class GraphQueryService:
         try:
             return self.db.run_query(
                 """
-                MATCH (u:User {id: $user_id})-[:FRIEND*2..3]->(candidate:User)
-                WHERE candidate.id <> $user_id
+                MATCH (u:User)
+                WHERE (u.id = $user_id OR u.source_id = $user_id)
+                MATCH (u)-[:FRIEND*2..3]->(candidate:User)
+                WHERE candidate <> u
                   AND NOT (u)-[:FRIEND]->(candidate)
                 WITH candidate, count(*) AS path_count
                 ORDER BY path_count DESC LIMIT $top_k

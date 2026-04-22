@@ -164,3 +164,19 @@ class InsertResult(BaseModel):
     error: Optional[str] = None
     requires_confirm: bool = False
     preview: Optional[Dict[str, Any]] = None
+
+
+# ── Direct graph (Neo4j) read API — structured rows from GraphQueryService ──
+
+class NLInsertParseRequest(BaseModel):
+    """Body for /chat/insert/parse — same fields as NLInsertRequest except confirm is unused."""
+    nl_command: str = Field(..., min_length=5, max_length=2000)
+    dataset: Optional[str] = None
+
+
+class NLInsertParseResponse(BaseModel):
+    ok: bool
+    dataset: str = ""
+    operations: List[Dict[str, Any]] = []
+    parsed_names: List[str] = []
+    error: Optional[str] = None

@@ -46,10 +46,12 @@ from rag.hybrid_retrieval import (
 )
 from api.services.pipeline import MultiAgentPipeline
 from api.services.chat_service import ChatService, InsertService
+from api.services.graph_service import GraphQueryService
 from api.schemas import (
     ChatRequest, ChatResponse,
     NLInsertRequest, InsertResult,
-    InsertUserRequest, InsertEdgeRequest,
+    InsertUserRequest, InsertEdgeRequest, InsertPostRequest,
+    NLInsertParseRequest, NLInsertParseResponse,
     DatasetsStatusResponse, DatasetStatus, IngestResponse,
 )
 from api.bootstrap.config import ALL_DATASETS, AUTO_INGEST, FORCE_REINGEST
@@ -69,6 +71,7 @@ class AppState:
     embedding_populator = None
     chat_service       = None
     insert_service     = None
+    graph_service      = None
     dataset_statuses   = {}
     ingest_results     = {}
 
@@ -180,6 +183,7 @@ async def lifespan(app: FastAPI):
     app_state.pipeline  = MultiAgentPipeline(retriever=app_state.retriever, inference_engine=gnn_engine)
     app_state.chat_service   = ChatService(pipeline=app_state.pipeline, neo4j_client=app_state.neo4j)
     app_state.insert_service = InsertService(neo4j_client=app_state.neo4j)
+    app_state.graph_service  = GraphQueryService(app_state.neo4j)
 
     logger.info("=== API ready ===")
     yield
@@ -425,6 +429,142 @@ async def refresh_embeddings(force: bool = False):
         raise HTTPException(503, "Embedding populator not initialized")
     counts = app_state.embedding_populator.populate_all(force_refresh=force)
     return {"status": "ok", "counts": counts}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# DIRECT GRAPH QUERIES (GraphQueryService — structured Neo4j rows, no LLM pipeline)
+# ══════════════════════════════════════════════════════════════════════════════
+
+@app.get("/graph/friend-recommendations/{user_id}", tags=["Graph (direct)"])
+async def graph_friend_recommendations(
+    user_id: str,
+    top_k: int = Query(default=10, ge=1, le=100),
+):
+    """Friend-of-friend suggestions from Cypher (mutual friend counts)."""
+    if not app_state.graph_service:
+        raise HTTPException(503, "Graph service not initialized")
+    rows = app_state.graph_service.get_friend_recommendations(user_id, top_k=top_k)
+    return {"user_id": user_id, "top_k": top_k, "recommendations": rows}
+
+
+@app.get("/graph/trending-posts", tags=["Graph (direct)"])
+async def graph_trending_posts(
+    top_k: int = Query(default=10, ge=1, le=100),
+    topic: Optional[str] = Query(default=None),
+    hours_window: int = Query(default=48, ge=1, le=24 * 30),
+):
+    """Trending posts by engagement score (likes + 2×comments)."""
+    if not app_state.graph_service:
+        raise HTTPException(503, "Graph service not initialized")
+    rows = app_state.graph_service.get_trending_posts(
+        top_k=top_k, topic=topic, hours_window=hours_window
+    )
+    return {"top_k": top_k, "topic": topic, "hours_window": hours_window, "posts": rows}
+
+
+@app.get("/graph/users/{user_id}/influence-stats", tags=["Graph (direct)"])
+async def graph_user_influence_stats(user_id: str):
+    """Per-user activity and influence fields from Neo4j (not the multi-agent pipeline)."""
+    if not app_state.graph_service:
+        raise HTTPException(503, "Graph service not initialized")
+    return app_state.graph_service.get_user_influence_stats(user_id)
+
+
+@app.get("/graph/connection-path", tags=["Graph (direct)"])
+async def graph_connection_path(
+    user_a: str = Query(..., description="First user id or source_id"),
+    user_b: str = Query(..., description="Second user id or source_id"),
+):
+    """Shortest path, mutual friends, and common liked posts between two users."""
+    if not app_state.graph_service:
+        raise HTTPException(503, "Graph service not initialized")
+    return app_state.graph_service.get_connection_path(user_a, user_b)
+
+
+@app.get("/graph/link-prediction/candidates/{user_id}", tags=["Graph (direct)"])
+async def graph_link_prediction_candidates(
+    user_id: str,
+    top_k: int = Query(default=20, ge=1, le=200),
+):
+    """2–3 hop non-friend candidates scored by path count (graph-side candidates for GNN)."""
+    if not app_state.graph_service:
+        raise HTTPException(503, "Graph service not initialized")
+    rows = app_state.graph_service.get_link_prediction_candidates(user_id, top_k=top_k)
+    return {"user_id": user_id, "top_k": top_k, "candidates": rows}
+
+
+@app.get("/graph/top-influencers", tags=["Graph (direct)"])
+async def graph_top_influencers(top_k: int = Query(default=20, ge=1, le=200)):
+    """Network-wide ranked users by a composite of followers, avg likes, and post count."""
+    if not app_state.graph_service:
+        raise HTTPException(503, "Graph service not initialized")
+    rows = app_state.graph_service.get_all_top_influencers(top_k=top_k)
+    return {"top_k": top_k, "influencers": rows}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# GNN / MODEL STATUS
+# ══════════════════════════════════════════════════════════════════════════════
+
+@app.get("/gnn/status", tags=["System"])
+async def gnn_status():
+    """Which pretrained GNN engines are loaded in memory."""
+    from model.inference import DATASET_CONFIG
+
+    return {
+        "loaded_datasets": list(inference_manager.engines.keys()),
+        "all_configured_datasets": list(DATASET_CONFIG.keys()),
+        "load_state": inference_manager.status(),
+    }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# CHAT INSERT — extra helpers (parse preview, structured post)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _nl_parse_to_response(parsed: dict) -> NLInsertParseResponse:
+    if not parsed.get("ok"):
+        return NLInsertParseResponse(
+            ok=False,
+            error=parsed.get("error"),
+            dataset=(parsed.get("dataset") or ""),
+        )
+    ops_out = []
+    for op in parsed.get("operations", []):
+        payload = op.get("payload")
+        pl = payload.model_dump() if hasattr(payload, "model_dump") else payload
+        ops_out.append({"type": op["type"], "payload": pl})
+    return NLInsertParseResponse(
+        ok=True,
+        dataset=parsed.get("dataset") or "",
+        operations=ops_out,
+        parsed_names=list(parsed.get("parsed_names") or []),
+    )
+
+
+@app.post("/chat/insert/parse", tags=["Chat"], response_model=NLInsertParseResponse)
+async def chat_insert_parse(req: NLInsertParseRequest):
+    """
+    Parse a natural-language insert command into structured operations (preview only).
+    Does not write to the database. Use for UI step-before-confirm.
+    """
+    if not app_state.insert_service:
+        raise HTTPException(503, "Insert service not initialized")
+    from api.schemas import NLInsertRequest
+    inner = NLInsertRequest(nl_command=req.nl_command, dataset=req.dataset, confirm=False)
+    parsed = app_state.insert_service.parse_nl_insert(inner)
+    return _nl_parse_to_response(parsed)
+
+
+@app.post("/chat/insert/post", tags=["Chat"], response_model=InsertResult)
+async def insert_post_structured(req: InsertPostRequest, confirm: bool = Query(default=False)):
+    """
+    Create a Post linked to an existing User (by dataset + author source_id).
+    The author User must already exist (e.g. from /chat/insert/user). confirm=true to execute.
+    """
+    if not app_state.insert_service:
+        raise HTTPException(503, "Insert service not initialized")
+    return app_state.insert_service.insert_post(req, preview_only=not confirm)
 
 
 if __name__ == "__main__":

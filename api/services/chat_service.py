@@ -278,6 +278,90 @@ class InsertService:
             logger.error(f"insert_edge failed: {e}")
             return InsertResult(ok=False, operation="failed", error=str(e))
 
+    def insert_post(self, req: InsertPostRequest, preview_only: bool = False) -> InsertResult:
+        """Create or merge a Post and (:User)-[:POSTED]->(:Post) for a chat/API insert."""
+        source_id = (req.source_id or f"post_{uuid.uuid4().hex[:8]}").strip()
+        post_key_id = f"{req.dataset[:2]}_{source_id}"
+        author_id = (req.author_source_id or "").strip()
+        if not author_id:
+            return InsertResult(
+                ok=False, operation="failed",
+                error="author_source_id is required (user source_id in this dataset).",
+            )
+
+        preview = {
+            "type": "MERGE Post + POSTED",
+            "dataset": req.dataset,
+            "post_source_id": source_id,
+            "id": post_key_id,
+            "title": req.title,
+            "author_source_id": author_id,
+        }
+
+        if preview_only:
+            return InsertResult(
+                ok=True,
+                operation="preview",
+                nodes_created=0,
+                edges_created=0,
+                cypher_summary="MERGE Post + MERGE (User)-[:POSTED]->(Post)",
+                preview=preview,
+                requires_confirm=True,
+            )
+
+        found = self.neo4j.run_query(
+            """
+            MATCH (u:User {dataset: $dataset, source_id: $author_source_id})
+            RETURN u.id AS id LIMIT 1
+            """,
+            {"dataset": req.dataset, "author_source_id": author_id},
+        )
+        if not found:
+            return InsertResult(
+                ok=False,
+                operation="failed",
+                error=f"No User with dataset={req.dataset!r} and source_id={author_id!r}.",
+            )
+
+        cypher = """
+        MATCH (u:User {dataset: $dataset, source_id: $author_source_id})
+        MERGE (p:Post {dataset: $dataset, source_id: $post_source_id})
+        SET p.id = $id,
+            p.title = $title,
+            p.content = $content,
+            p.topic = $topic,
+            p.like_count = coalesce(p.like_count, 0),
+            p.comment_count = coalesce(p.comment_count, 0),
+            p.created_at = coalesce(p.created_at, toString(datetime())),
+            p.inserted_via = 'api'
+        MERGE (u)-[:POSTED]->(p)
+        RETURN p.id AS post_id
+        """
+        try:
+            self.neo4j.run_write_query(
+                cypher,
+                {
+                    "dataset": req.dataset,
+                    "post_source_id": source_id,
+                    "id": post_key_id,
+                    "title": req.title,
+                    "content": req.content or "",
+                    "topic": req.topic,
+                    "author_source_id": author_id,
+                },
+            )
+            return InsertResult(
+                ok=True,
+                operation="inserted",
+                nodes_created=1,
+                edges_created=1,
+                cypher_summary=f"MERGE Post({post_key_id}) POSTED by {author_id} in {req.dataset}",
+                detail=preview,
+            )
+        except Exception as e:
+            logger.error(f"insert_post failed: {e}")
+            return InsertResult(ok=False, operation="failed", error=str(e))
+
     # ── NL insert (LLM-assisted extraction) ───────────────────────────────────
 
     def parse_nl_insert(self, req: NLInsertRequest) -> Dict[str, Any]:
