@@ -103,7 +103,13 @@ class TestIngest:
 
         from db.ingest.ingest_all import ingest_dataset
         client = self._mock_neo4j()
-        client.run_query.return_value = [{"users": 10}]
+        # get_dataset_counts issues three Cypher count queries; one return shape fits all
+        # calls only if we provide users/posts/edges in lockstep
+        client.run_query.side_effect = [
+            [{"users": 10}],
+            [{"posts": 0}],
+            [{"edges": 0}],
+        ]
         result = ingest_dataset(client, "facebook")
         assert result.get("status") == "skipped_already_ingested"
         assert result.get("ok") is True

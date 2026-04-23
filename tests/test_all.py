@@ -179,60 +179,37 @@ class TestInferenceEngine:
         assert isinstance(results, list)
 
 
-# ─── Vector Store Tests ───────────────────────────────────────────────────────
+# ─── Vector / embedding tests (Neo4j-only stack; FAISS / InMemoryVectorIndex removed) ─
+
+def _cosine_np(a: np.ndarray, b: np.ndarray) -> float:
+    denom = float(np.linalg.norm(a) * np.linalg.norm(b)) + 1e-12
+    return float(np.dot(a, b) / denom)
+
 
 class TestVectorStore:
 
-    def test_in_memory_index_add_and_search(self):
-        """In-memory vector index should return results after adding vectors."""
-        from rag.vector_store import InMemoryVectorIndex
+    @patch("rag.neo4j_vector_store.SentenceTransformer")
+    def test_text_embedding_engine_encode(self, mock_st):
+        """TextEmbeddingEngine.encode returns a dense list (Neo4j stores list properties)."""
+        mock_st.return_value.encode.return_value = np.random.randn(384).astype(np.float32)
+        from rag.neo4j_vector_store import TextEmbeddingEngine
 
-        idx = InMemoryVectorIndex(dim=16)
-        for i in range(20):
-            idx.add(np.random.randn(16).astype(np.float32), {"id": f"item_{i}", "name": f"Item {i}"})
-
-        query = np.random.randn(16).astype(np.float32)
-        results = idx.search(query, top_k=5)
-
-        assert len(results) == 5
-        assert "similarity_score" in results[0]
-
-    def test_in_memory_index_empty_search(self):
-        """Search on empty index should return empty list."""
-        from rag.vector_store import InMemoryVectorIndex
-
-        idx = InMemoryVectorIndex(dim=32)
-        results = idx.search(np.random.randn(32), top_k=5)
-        assert results == []
-
-    def test_text_store_embeds_text(self):
-        """Text store should produce embedding of expected dimension."""
-        from rag.vector_store import TextEmbeddingStore
-
-        store = TextEmbeddingStore()
-        emb = store.embed_text("Hello world, this is a test.")
-
-        assert isinstance(emb, np.ndarray)
-        assert emb.ndim == 1
-        assert emb.shape[0] > 0
+        eng = TextEmbeddingEngine(model_name="test-model")
+        out = eng.encode("Hello world, this is a test.")
+        assert isinstance(out, list)
+        assert len(out) == 384
 
     def test_cosine_similarity_self(self):
         """Cosine similarity of a vector with itself should be 1.0."""
-        from rag.vector_store import TextEmbeddingStore
-
-        store = TextEmbeddingStore()
         v = np.random.randn(128).astype(np.float32)
-        sim = store.cosine_similarity(v, v)
+        sim = _cosine_np(v, v)
         assert abs(sim - 1.0) < 1e-5
 
     def test_cosine_similarity_orthogonal(self):
         """Cosine similarity of orthogonal vectors should be ~0."""
-        from rag.vector_store import TextEmbeddingStore
-
-        store = TextEmbeddingStore()
-        v1 = np.array([1.0, 0.0, 0.0])
-        v2 = np.array([0.0, 1.0, 0.0])
-        sim = store.cosine_similarity(v1, v2)
+        v1 = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+        v2 = np.array([0.0, 1.0, 0.0], dtype=np.float32)
+        sim = _cosine_np(v1, v2)
         assert abs(sim) < 1e-5
 
 
@@ -287,8 +264,12 @@ class TestQueryAnalyzer:
 class TestHybridRetrieval:
 
     def _make_retriever(self):
-        from rag.hybrid_retrieval import HybridRetriever, GraphRetriever, VectorRetriever
-        from rag.vector_store import TextEmbeddingStore, InMemoryVectorIndex
+        from rag.hybrid_retrieval import (
+            HybridRetriever,
+            GraphRetriever,
+            VectorRetriever,
+            VectorContext,
+        )
 
         mock_neo4j = MagicMock()
         mock_neo4j.is_connected = True
@@ -298,18 +279,30 @@ class TestHybridRetrieval:
         ]
 
         graph_ret = GraphRetriever(mock_neo4j)
-        text_store = TextEmbeddingStore()
-        user_idx = InMemoryVectorIndex(dim=384)
-        post_idx = InMemoryVectorIndex(dim=384)
+        vector_ret = VectorRetriever(mock_neo4j)
 
-        # Add dummy entries to user index
-        for i in range(5):
-            user_idx.add(
-                np.random.randn(384).astype(np.float32),
-                {"id": f"user_{i}", "name": f"User {i}"},
+        def _vc(query: str, results, index_used: str = "test_index"):
+            return VectorContext(
+                query=query,
+                results=results,
+                model_used="test",
+                index_used=index_used,
             )
 
-        vector_ret = VectorRetriever(text_store, user_idx, post_idx)
+        vector_ret.search_users = MagicMock(
+            return_value=_vc("q", [{"id": "u0", "similarity_score": 0.8}])
+        )
+        vector_ret.search_posts = MagicMock(return_value=_vc("q", [], "post_text_embeddings"))
+        vector_ret.search_friends_semantically = MagicMock(
+            return_value=_vc(
+                "recommend friends",
+                [{"id": "u1", "fusion_score": 0.9, "similarity_score": 0.7}],
+                "neo4j_hybrid",
+            )
+        )
+        vector_ret.search_trending_hybrid = MagicMock(
+            return_value=_vc("trending", [], "neo4j_hybrid")
+        )
         return HybridRetriever(graph_ret, vector_ret)
 
     def test_graph_only_retrieval(self):
@@ -476,20 +469,39 @@ class TestAPIEndpoints:
 
     @pytest.fixture(autouse=True)
     def setup(self):
-        """Mock all external dependencies before testing API."""
+        """Mock Neo4j and heavy startup so lifespan completes with pipeline ready.
+
+        Patching `api.main.get_neo4j_client` is required: `api.main` binds the imported
+        function, so replacing `db.neo4j_client.get_neo4j_client` alone does not update
+        the reference used by the FastAPI lifespan.
+        """
         from fastapi.testclient import TestClient
 
-        with patch("db.neo4j_client.Neo4jClient.connect", return_value=True), \
-             patch("db.neo4j_client.Neo4jClient.is_connected", new_callable=lambda: property(lambda self: True)), \
-             patch("db.neo4j_client.Neo4jClient.run_query", return_value=[]), \
-             patch("db.neo4j_client.Neo4jClient.run_write_query", return_value={}), \
-             patch("db.neo4j_client.Neo4jClient.setup_schema"), \
-             patch("db.neo4j_client.Neo4jClient.seed_demo_data"), \
-             patch("model.inference.inference_manager.load_dataset"):
+        mock_nj = MagicMock()
+        mock_nj.is_connected = True
+        mock_nj.run_query.return_value = [
+            {"id": "user_1", "name": "Alice", "mutual_friends": 3, "influence_score": 0.8},
+            {"id": "user_2", "name": "Bob", "mutual_friends": 2, "influence_score": 0.6},
+        ]
+        mock_nj.run_write_query.return_value = {"counters": {}}
+        mock_nj.setup_schema = MagicMock()
+        mock_nj.seed_demo_data = MagicMock()
+        mock_nj.close = MagicMock()
+
+        with (
+            patch("api.main.get_neo4j_client", return_value=mock_nj),
+            patch("model.inference.inference_manager.load_dataset"),
+            patch(
+                "rag.neo4j_vector_store.Neo4jEmbeddingPopulator.populate_all",
+                return_value={"users": 0, "posts": 0},
+            ),
+        ):
 
             from api.main import app
-            self.client = TestClient(app)
-            yield
+            # Context manager is required so FastAPI lifespan runs (wires pipeline, neo4j, etc.)
+            with TestClient(app) as test_client:
+                self.client = test_client
+                yield
 
     def test_health_endpoint(self):
         resp = self.client.get("/health")
@@ -565,14 +577,15 @@ class TestUtils:
 
     def test_early_stopping_triggers(self):
         from model.utils import EarlyStopping
-        import tempfile, os
+        import tempfile
+        import os
+        import torch.nn as nn
 
         stopper = EarlyStopping(patience=3)
-        model = MagicMock()
+        model = nn.Linear(1, 1)  # torch.save must pickle; MagicMock does not
         with tempfile.NamedTemporaryFile(suffix=".pth", delete=False) as f:
             path = f.name
 
-        # Stagnating scores should trigger early stopping
         for score in [0.8, 0.79, 0.78, 0.77]:
             stop = stopper(score, model, path)
 

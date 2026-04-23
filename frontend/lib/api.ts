@@ -27,6 +27,13 @@ export interface HealthResponse {
   ingest_results?: Record<string, string>;
 }
 
+/** /gnn/status — one row per platform the backend can load (facebook, twitter, reddit). */
+export interface GnnStatusResponse {
+  loaded_datasets: string[];
+  all_configured_datasets: string[];
+  load_state: Record<string, boolean>;
+}
+
 export interface PipelineResult {
   intent: string;
   query: string;
@@ -64,6 +71,8 @@ export interface ChatResponse {
   graph_context_summary: string;
   pipeline_timing_ms?: Record<string, number>;
   session_id?: string;
+  /** Which pretrained GNN ran (facebook | twitter | reddit; all/demo → facebook). */
+  gnn_dataset_used?: string;
 }
 
 export interface InsertResult {
@@ -155,8 +164,7 @@ export const api = {
   vectorIndexes: () => request<{ indexes: unknown[] }>("/vector-indexes"),
   refreshEmbeddings: (force = false) =>
     request<{ status: string; counts: Record<string, number> }>(`/refresh-embeddings?force=${force}`, { method: "POST" }),
-  gnnStatus: () =>
-    request<{ loaded_datasets: string[]; all_configured_datasets: string[]; load_state: Record<string, boolean> }>("/gnn/status"),
+  gnnStatus: () => request<GnnStatusResponse>("/gnn/status"),
 
   // Datasets
   datasetsStatus: () =>
@@ -168,8 +176,16 @@ export const api = {
     ),
 
   // Chat
-  chat: (body: { message: string; dataset?: string; mode?: string; top_k?: number; session_id?: string; user_id?: string }) =>
-    request<ChatResponse>("/chat", { method: "POST", body: JSON.stringify(body) }),
+  chat: (body: {
+    message: string;
+    dataset?: string;
+    /** Which GNN weights to run (optional). Omitted = follow `dataset` (all/demo → facebook). */
+    gnn_dataset?: string;
+    mode?: string;
+    top_k?: number;
+    session_id?: string;
+    user_id?: string;
+  }) => request<ChatResponse>("/chat", { method: "POST", body: JSON.stringify(body) }),
 
   // Insert
   insertParse: (nl_command: string, dataset?: string) =>
@@ -201,16 +217,30 @@ export const api = {
   // Pipeline
   query: (body: Record<string, unknown>) =>
     request<PipelineResult>("/query", { method: "POST", body: JSON.stringify(body) }),
-  recommendFriends: (userId: string, topK = 10, dataset = "all") =>
-    request<PipelineResult>(`/recommend-friends/${userId}?top_k=${topK}&dataset=${dataset}`),
+  recommendFriends: (userId: string, topK = 10, dataset = "all", gnnDataset?: string) => {
+    const g = gnnDataset ? `&gnn_dataset=${encodeURIComponent(gnnDataset)}` : "";
+    return request<PipelineResult>(
+      `/recommend-friends/${userId}?top_k=${topK}&dataset=${encodeURIComponent(dataset)}${g}`,
+    );
+  },
   predictLinks: (body: Record<string, unknown>) =>
     request<PipelineResult>("/predict-links", { method: "POST", body: JSON.stringify(body) }),
-  userInfluence: (userId: string, dataset = "all") =>
-    request<PipelineResult>(`/user-influence/${userId}?dataset=${dataset}`),
-  trendingPosts: (topK = 10, topic?: string, dataset = "all") =>
-    request<PipelineResult>(`/trending-posts?top_k=${topK}${topic ? `&topic=${topic}` : ""}&dataset=${dataset}`),
-  explainConnection: (userA: string, userB: string, dataset = "all") =>
-    request<PipelineResult>(`/explain-connection?user_a=${userA}&user_b=${userB}&dataset=${dataset}`),
+  userInfluence: (userId: string, dataset = "all", gnnDataset?: string) => {
+    const g = gnnDataset ? `&gnn_dataset=${encodeURIComponent(gnnDataset)}` : "";
+    return request<PipelineResult>(`/user-influence/${userId}?dataset=${encodeURIComponent(dataset)}${g}`);
+  },
+  trendingPosts: (topK = 10, topic?: string, dataset = "all", gnnDataset?: string) => {
+    const g = gnnDataset ? `&gnn_dataset=${encodeURIComponent(gnnDataset)}` : "";
+    return request<PipelineResult>(
+      `/trending-posts?top_k=${topK}${topic ? `&topic=${encodeURIComponent(topic)}` : ""}&dataset=${encodeURIComponent(dataset)}${g}`,
+    );
+  },
+  explainConnection: (userA: string, userB: string, dataset = "all", gnnDataset?: string) => {
+    const g = gnnDataset ? `&gnn_dataset=${encodeURIComponent(gnnDataset)}` : "";
+    return request<PipelineResult>(
+      `/explain-connection?user_a=${encodeURIComponent(userA)}&user_b=${encodeURIComponent(userB)}&dataset=${encodeURIComponent(dataset)}${g}`,
+    );
+  },
 
   // Direct graph
   graphFriendRecs: (userId: string, topK = 10) =>

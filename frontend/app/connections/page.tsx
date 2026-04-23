@@ -2,6 +2,7 @@
 import { useState } from "react";
 import { Search, GitBranch, ArrowRight, Loader2 } from "lucide-react";
 import { api, ConnectionPath } from "@/lib/api";
+import { GNN_MODEL_OPTIONS } from "@/lib/dataset-options";
 import { Panel, Badge, Button, Input, Select, SectionHeader, Empty } from "@/components/ui";
 
 function PathViz({ path }: { path: NonNullable<ConnectionPath["shortest_path"]> }) {
@@ -38,6 +39,7 @@ export default function ConnectionsPage() {
   const [userA, setUserA] = useState("user_1");
   const [userB, setUserB] = useState("user_5");
   const [dataset, setDataset] = useState("all");
+  const [gnnDataset, setGnnDataset] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [pathData, setPathData] = useState<ConnectionPath | null>(null);
@@ -54,7 +56,7 @@ export default function ConnectionsPage() {
   const explainConnection = async () => {
     setLoading(true); setError(null);
     try {
-      const r = await api.explainConnection(userA, userB, dataset);
+      const r = await api.explainConnection(userA, userB, dataset, gnnDataset || undefined);
       setExplainData(r as unknown as Record<string, unknown>);
     } catch (e) { setError(String(e)); } finally { setLoading(false); }
   };
@@ -83,6 +85,7 @@ export default function ConnectionsPage() {
             { value: "all", label: "All" }, { value: "facebook", label: "Facebook" },
             { value: "twitter", label: "Twitter" }, { value: "reddit", label: "Reddit" }, { value: "demo", label: "Demo" },
           ]} />
+          <Select value={gnnDataset} onChange={setGnnDataset} options={GNN_MODEL_OPTIONS} />
           <Button onClick={queryPath} loading={loading} variant="primary">
             <Search className="w-3.5 h-3.5" /> Find Path
           </Button>

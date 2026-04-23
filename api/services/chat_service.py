@@ -98,6 +98,8 @@ class ChatService:
         )
         if req.user_id:
             context["user_id"] = req.user_id
+        if req.gnn_dataset:
+            context["gnn_dataset"] = req.gnn_dataset
 
         # Run pipeline (dataset filter passed as context, agents thread it through)
         result = self.pipeline.run(
@@ -130,6 +132,7 @@ class ChatService:
             graph_context_summary=result.get("graph_context", ""),
             pipeline_timing_ms=result.get("pipeline_timing_ms"),
             session_id=req.session_id,
+            gnn_dataset_used=result.get("gnn_dataset_used"),
         )
 
     def _extract_cited_datasets(self, results: List[Dict]) -> List[str]:

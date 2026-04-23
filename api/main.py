@@ -138,11 +138,12 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.warning(f"Embedding population: {e}")
 
-    # ── Step 6: GNN models ────────────────────────────────────────────────────
-    try:
-        inference_manager.load_dataset("facebook")
-    except Exception as e:
-        logger.warning(f"GNN model load: {e}")
+    # ── Step 6: GNN models (one engine per platform; /chat `dataset` selects which runs) ──
+    for _ds in ("facebook", "twitter", "reddit"):
+        try:
+            inference_manager.load_dataset(_ds)
+        except Exception as e:
+            logger.warning("GNN model load %s: %s", _ds, e)
 
     # ── Step 7: Wire retriever + pipeline + services ──────────────────────────
     text_engine = get_text_engine()
@@ -179,8 +180,10 @@ async def lifespan(app: FastAPI):
         vec_ret = _NullVector()
 
     app_state.retriever = HybridRetriever(graph_retriever=graph_ret, vector_retriever=vec_ret)
-    gnn_engine = inference_manager.get_engine("facebook") if inference_manager.engines else None
-    app_state.pipeline  = MultiAgentPipeline(retriever=app_state.retriever, inference_engine=gnn_engine)
+    app_state.pipeline = MultiAgentPipeline(
+        retriever=app_state.retriever,
+        inference_manager=inference_manager,
+    )
     app_state.chat_service   = ChatService(pipeline=app_state.pipeline, neo4j_client=app_state.neo4j)
     app_state.insert_service = InsertService(neo4j_client=app_state.neo4j)
     app_state.graph_service  = GraphQueryService(app_state.neo4j)
@@ -334,9 +337,22 @@ async def insert_edge_structured(req: InsertEdgeRequest, confirm: bool = Query(d
 # EXISTING ENDPOINTS (unchanged)
 # ══════════════════════════════════════════════════════════════════════════════
 
+
+def _with_gnn_context(base: dict, gnn_dataset: Optional[str] = None) -> dict:
+    """Merge optional gnn_dataset into pipeline context (which pretrained weights to use)."""
+    out = dict(base)
+    if gnn_dataset and gnn_dataset in ("facebook", "twitter", "reddit"):
+        out["gnn_dataset"] = gnn_dataset
+    return out
+
+
 @app.get("/recommend-friends/{user_id}", tags=["Recommendations"])
-async def recommend_friends(user_id: str, top_k: int = Query(default=10, ge=1, le=50),
-                            dataset: Optional[str] = Query(default="all")):
+async def recommend_friends(
+    user_id: str,
+    top_k: int = Query(default=10, ge=1, le=50),
+    dataset: Optional[str] = Query(default="all"),
+    gnn_dataset: Optional[str] = Query(default=None, description="Override GNN: facebook|twitter|reddit"),
+):
     if not app_state.pipeline:
         raise HTTPException(503, "Pipeline not initialized")
     if not app_state.neo4j or not app_state.neo4j.is_connected:
@@ -348,7 +364,7 @@ async def recommend_friends(user_id: str, top_k: int = Query(default=10, ge=1, l
         )
     return app_state.pipeline.run(
         query=f"Recommend {top_k} new friends for user {user_id}",
-        context={"user_id": user_id, "dataset": dataset},
+        context=_with_gnn_context({"user_id": user_id, "dataset": dataset}, gnn_dataset),
         top_k=top_k,
     )
 
@@ -359,46 +375,64 @@ async def predict_links(body: dict):
         raise HTTPException(503, "Pipeline not initialized")
     return app_state.pipeline.run(
         query=f"Predict potential connections for {body.get('user_id', 'user_1')}",
-        context={"user_id": body.get("user_id", "user_1"), "dataset": body.get("dataset", "all")},
+        context=_with_gnn_context(
+            {"user_id": body.get("user_id", "user_1"), "dataset": body.get("dataset", "all")},
+            body.get("gnn_dataset"),
+        ),
         top_k=body.get("top_k", 10),
     )
 
 
 @app.get("/user-influence/{user_id}", tags=["Analytics"])
-async def user_influence(user_id: str, dataset: Optional[str] = Query(default="all")):
+async def user_influence(
+    user_id: str,
+    dataset: Optional[str] = Query(default="all"),
+    gnn_dataset: Optional[str] = Query(default=None, description="Override GNN: facebook|twitter|reddit"),
+):
     if not app_state.pipeline:
         raise HTTPException(503, "Pipeline not initialized")
     return app_state.pipeline.run(
         query=f"What is the influence and role of user {user_id}?",
-        context={"user_id": user_id, "dataset": dataset},
+        context=_with_gnn_context({"user_id": user_id, "dataset": dataset}, gnn_dataset),
         top_k=1,
     )
 
 
 @app.get("/trending-posts", tags=["Analytics"])
-async def trending_posts(top_k: int = Query(default=10, ge=1, le=50),
-                         topic: Optional[str] = Query(default=None),
-                         dataset: Optional[str] = Query(default="all")):
+async def trending_posts(
+    top_k: int = Query(default=10, ge=1, le=50),
+    topic: Optional[str] = Query(default=None),
+    dataset: Optional[str] = Query(default="all"),
+    gnn_dataset: Optional[str] = Query(default=None, description="Override GNN: facebook|twitter|reddit"),
+):
     if not app_state.pipeline:
         raise HTTPException(503, "Pipeline not initialized")
     query = f"Show me the top {top_k} trending posts"
     if topic:
         query += f" about {topic}"
+    base = {"topic": topic, "dataset": dataset} if topic else {"dataset": dataset}
     return app_state.pipeline.run(
         query=query,
-        context={"topic": topic, "dataset": dataset} if topic else {"dataset": dataset},
+        context=_with_gnn_context(base, gnn_dataset),
         top_k=top_k,
     )
 
 
 @app.get("/explain-connection", tags=["Explainability"])
-async def explain_connection(user_a: str = Query(...), user_b: str = Query(...),
-                              dataset: Optional[str] = Query(default="all")):
+async def explain_connection(
+    user_a: str = Query(...),
+    user_b: str = Query(...),
+    dataset: Optional[str] = Query(default="all"),
+    gnn_dataset: Optional[str] = Query(default=None, description="Override GNN: facebook|twitter|reddit"),
+):
     if not app_state.pipeline:
         raise HTTPException(503, "Pipeline not initialized")
     return app_state.pipeline.run(
         query=f"Explain the connection between {user_a} and {user_b}",
-        context={"user_a": user_a, "user_b": user_b, "dataset": dataset},
+        context=_with_gnn_context(
+            {"user_a": user_a, "user_b": user_b, "dataset": dataset},
+            gnn_dataset,
+        ),
         top_k=5,
     )
 

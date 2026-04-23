@@ -1,8 +1,18 @@
 "use client";
 import { useEffect, useState } from "react";
 import { Activity, Database, Cpu, Users, RefreshCw } from "lucide-react";
-import { api, HealthResponse } from "@/lib/api";
+import { api, HealthResponse, GnnStatusResponse } from "@/lib/api";
 import { StatCard, Panel, Badge, Button, Skeleton, StatusDot, SectionHeader } from "@/components/ui";
+
+/** Display order for GNN platforms (matches backend DATASET_CONFIG). */
+const GNN_PLATFORMS = ["facebook", "twitter", "reddit"] as const;
+
+function badgeVariantForDataset(name: string): "cyan" | "purple" | "amber" | "green" {
+  if (name === "facebook") return "cyan";
+  if (name === "twitter") return "purple";
+  if (name === "reddit") return "amber";
+  return "green";
+}
 
 function PipelineStep({ label, done }: { label: string; done?: boolean }) {
   return (
@@ -18,18 +28,31 @@ function PipelineStep({ label, done }: { label: string; done?: boolean }) {
 
 export default function Dashboard() {
   const [health, setHealth] = useState<HealthResponse | null>(null);
+  const [gnnStatus, setGnnStatus] = useState<GnnStatusResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   const load = async () => {
     setLoading(true); setError(null);
-    try { setHealth(await api.health()); } catch (e) { setError(String(e)); } finally { setLoading(false); }
+    try {
+      const [h, g] = await Promise.all([api.health(), api.gnnStatus().catch(() => null)]);
+      setHealth(h);
+      setGnnStatus(g);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setLoading(false);
+    }
   };
 
   useEffect(() => { load(); }, []);
 
   const totalUsers = health?.dataset_counts ? Object.values(health.dataset_counts).reduce((s, d) => s + (d.users || 0), 0) : 0;
   const totalPosts = health?.dataset_counts ? Object.values(health.dataset_counts).reduce((s, d) => s + (d.posts || 0), 0) : 0;
+
+  const loadedSet = new Set(gnnStatus?.loaded_datasets ?? health?.gnn_datasets ?? []);
+  const gnnLoadedCount = GNN_PLATFORMS.filter((p) => loadedSet.has(p)).length;
+  const gnnTotalPlatforms = GNN_PLATFORMS.length;
 
   return (
     <div className="p-6 max-w-6xl">
@@ -56,7 +79,13 @@ export default function Dashboard() {
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
         {loading ? Array.from({ length: 4 }).map((_, i) => <Skeleton key={i} className="h-24" />) : (<>
           <StatCard label="Neo4j" value={health?.neo4j_connected ? "Online" : "Offline"} sub="Graph database" color={health?.neo4j_connected ? "#10b981" : "#ef4444"} icon={<Database className="w-4 h-4" />} />
-          <StatCard label="GNN Models" value={health?.gnn_datasets.length || 0} sub={health?.gnn_loaded ? "Loaded" : "Not loaded"} color={health?.gnn_loaded ? "#a855f7" : "#484f58"} icon={<Cpu className="w-4 h-4" />} />
+          <StatCard
+            label="GNN Models"
+            value={`${gnnLoadedCount}/${gnnTotalPlatforms}`}
+            sub="Facebook · Twitter · Reddit"
+            color={gnnLoadedCount > 0 ? "#a855f7" : "#484f58"}
+            icon={<Cpu className="w-4 h-4" />}
+          />
           <StatCard label="Total Users" value={totalUsers.toLocaleString()} sub="Across all datasets" color="#00d4ff" icon={<Users className="w-4 h-4" />} />
           <StatCard label="Total Posts" value={totalPosts.toLocaleString()} sub="Indexed content" color="#fbbf24" icon={<Activity className="w-4 h-4" />} />
         </>)}
@@ -67,7 +96,7 @@ export default function Dashboard() {
           <SectionHeader title="System Status" sub={`v${health?.version || "—"}`}
             action={<Button variant="ghost" size="sm" onClick={load} loading={loading}><RefreshCw className="w-3 h-3" /></Button>} />
           <div className="space-y-3">
-            {[{ k: "Neo4j Database", v: health?.neo4j_connected }, { k: "GNN Engine", v: health?.gnn_loaded }, { k: "Pipeline", v: health?.pipeline_ready }, { k: "Vector Backend", v: !!health?.vector_backend }].map(({ k, v }) => (
+            {[{ k: "Neo4j Database", v: health?.neo4j_connected }, { k: "GNN Engine (any)", v: health?.gnn_loaded || gnnLoadedCount > 0 }, { k: "Pipeline", v: health?.pipeline_ready }, { k: "Vector Backend", v: !!health?.vector_backend }].map(({ k, v }) => (
               <div key={k} className="flex items-center justify-between">
                 <span className="text-xs font-mono" style={{ color: "#8b949e" }}>{k}</span>
                 <div className="flex items-center gap-2">
@@ -94,7 +123,7 @@ export default function Dashboard() {
                 <div key={name} className="p-3 rounded-lg" style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.06)" }}>
                   <div className="flex items-center justify-between mb-1">
                     <span className="text-xs font-mono font-semibold" style={{ color: "#e6edf3" }}>{name}</span>
-                    <Badge variant={name === "facebook" ? "cyan" : name === "twitter" ? "purple" : name === "reddit" ? "amber" : "green"}>{name}</Badge>
+                    <Badge variant={badgeVariantForDataset(name)}>{name}</Badge>
                   </div>
                   <div className="flex gap-3">
                     {Object.entries(counts).map(([k, v]) => (
@@ -122,12 +151,25 @@ export default function Dashboard() {
               { label: "Validator + dedup", done: health?.pipeline_ready },
             ].map(({ label, done }, i) => <PipelineStep key={i} label={label} done={!!done} />)}
           </div>
-          {health?.gnn_datasets && health.gnn_datasets.length > 0 && (
-            <div className="mt-4 pt-4 border-t" style={{ borderColor: "rgba(255,255,255,0.06)" }}>
-              <div className="text-[11px] font-mono mb-1" style={{ color: "#484f58" }}>Loaded GNN Datasets</div>
-              <div className="flex flex-wrap gap-1">{health.gnn_datasets.map((d) => <Badge key={d} variant="purple">{d}</Badge>)}</div>
+          <div className="mt-4 pt-4 border-t" style={{ borderColor: "rgba(255,255,255,0.06)" }}>
+            <div className="text-[11px] font-mono mb-2" style={{ color: "#484f58" }}>GNN by platform (weights in /weights)</div>
+            <div className="space-y-2">
+              {GNN_PLATFORMS.map((name) => {
+                const ok = loadedSet.has(name);
+                return (
+                  <div key={name} className="flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <StatusDot ok={ok} loading={loading} />
+                      <Badge variant={badgeVariantForDataset(name)}>{name}</Badge>
+                    </div>
+                    <span className="text-[10px] font-mono truncate" style={{ color: ok ? "#10b981" : "#6e7681" }}>
+                      {ok ? "loaded" : "not in memory"}
+                    </span>
+                  </div>
+                );
+              })}
             </div>
-          )}
+          </div>
         </Panel>
       </div>
 

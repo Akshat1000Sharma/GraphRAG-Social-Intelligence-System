@@ -2,6 +2,7 @@
 import { useState, useRef, useEffect } from "react";
 import { Send, Bot, User, Clock, Zap } from "lucide-react";
 import { api, ChatResponse } from "@/lib/api";
+import { GNN_MODEL_OPTIONS } from "@/lib/dataset-options";
 import { Panel, Badge, Button, Select, JsonBlock, SectionHeader } from "@/components/ui";
 
 interface Message {
@@ -13,9 +14,9 @@ interface Message {
 
 const DATASET_OPTIONS = [
   { value: "all", label: "All Datasets" },
-  { value: "facebook", label: "Facebook" },
-  { value: "twitter", label: "Twitter" },
-  { value: "reddit", label: "Reddit" },
+  { value: "facebook", label: "Facebook (GNN + graph)" },
+  { value: "twitter", label: "Twitter (GNN + graph)" },
+  { value: "reddit", label: "Reddit (GNN + graph)" },
   { value: "demo", label: "Demo" },
 ];
 
@@ -46,6 +47,8 @@ export default function ChatPage() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [dataset, setDataset] = useState("all");
+  /** Empty = let backend map GNN from `dataset` (all/demo → facebook). */
+  const [gnnDataset, setGnnDataset] = useState("");
   const [mode, setMode] = useState("hybrid");
   const [topK, setTopK] = useState("10");
   const [loading, setLoading] = useState(false);
@@ -60,7 +63,13 @@ export default function ChatPage() {
     setMessages((prev) => [...prev, { role: "user", content: msg, ts: Date.now() }]);
     setLoading(true);
     try {
-      const res = await api.chat({ message: msg, dataset, mode, top_k: parseInt(topK) });
+      const res = await api.chat({
+        message: msg,
+        dataset,
+        gnn_dataset: gnnDataset || undefined,
+        mode,
+        top_k: parseInt(topK),
+      });
       setMessages((prev) => [...prev, {
         role: "assistant",
         content: res.insight || "Query processed.",
@@ -90,9 +99,10 @@ export default function ChatPage() {
       </div>
 
       {/* Config bar */}
-      <div className="flex items-center gap-3 mb-4 flex-wrap">
+      <div className="flex items-center gap-3 mb-1 flex-wrap">
         <Select value={dataset} onChange={setDataset} options={DATASET_OPTIONS} />
         <Select value={mode} onChange={setMode} options={MODE_OPTIONS} />
+        <Select value={gnnDataset} onChange={setGnnDataset} options={GNN_MODEL_OPTIONS} />
         <Select value={topK} onChange={setTopK} options={[
           { value: "5", label: "Top 5" },
           { value: "10", label: "Top 10" },
@@ -100,6 +110,10 @@ export default function ChatPage() {
           { value: "50", label: "Top 50" },
         ]} />
       </div>
+      <p className="text-[10px] font-mono mb-4" style={{ color: "#6e7681" }}>
+        <strong>Dataset</strong> scopes the graph. <strong className="text-[#a855f7]">GNN</strong> row: choose
+        <em> Twitter / Reddit / Facebook weights</em> explicitly, or <em>Auto</em> to follow Dataset (All/Demo → Facebook GNN).
+      </p>
 
       {/* Messages */}
       <div className="flex-1 overflow-y-auto space-y-4 mb-4 pr-1">
@@ -157,6 +171,11 @@ export default function ChatPage() {
                   <div className="flex items-center gap-2 flex-wrap">
                     <Badge variant="cyan">{m.data.intent}</Badge>
                     <Badge variant="purple">{m.data.dataset_queried}</Badge>
+                    {m.data.gnn_dataset_used && (
+                      <Badge variant="amber" title="Pretrained GNN used for this reply">
+                        GNN: {m.data.gnn_dataset_used}
+                      </Badge>
+                    )}
                     <Badge variant="ghost">{m.data.mode}</Badge>
                     {m.data.pipeline_timing_ms?.total && (
                       <span className="text-[10px] font-mono flex items-center gap-1" style={{ color: "#484f58" }}>

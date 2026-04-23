@@ -2,6 +2,7 @@
 import { useState } from "react";
 import { Search, User, Loader2, Star, FileText, Users, Heart } from "lucide-react";
 import { api, UserInfluenceStats } from "@/lib/api";
+import { GNN_MODEL_OPTIONS } from "@/lib/dataset-options";
 import { Panel, Badge, Button, Input, Select, SectionHeader, StatCard } from "@/components/ui";
 
 function RoleClassification({ score }: { score: number }) {
@@ -13,6 +14,7 @@ function RoleClassification({ score }: { score: number }) {
 export default function UsersPage() {
   const [userId, setUserId] = useState("user_1");
   const [dataset, setDataset] = useState("all");
+  const [gnnDataset, setGnnDataset] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [stats, setStats] = useState<UserInfluenceStats | null>(null);
@@ -29,7 +31,7 @@ export default function UsersPage() {
   const runInfluence = async () => {
     setLoading(true); setError(null); setStats(null);
     try {
-      const r = await api.userInfluence(userId, dataset);
+      const r = await api.userInfluence(userId, dataset, gnnDataset || undefined);
       setPipelineResult(r as unknown as Record<string, unknown>);
     } catch (e) { setError(String(e)); } finally { setLoading(false); }
   };
@@ -53,6 +55,7 @@ export default function UsersPage() {
             { value: "all", label: "All" }, { value: "facebook", label: "Facebook" },
             { value: "twitter", label: "Twitter" }, { value: "reddit", label: "Reddit" }, { value: "demo", label: "Demo" },
           ]} />
+          <Select value={gnnDataset} onChange={setGnnDataset} options={GNN_MODEL_OPTIONS} />
           <Button onClick={lookupStats} loading={loading} variant="primary">
             <Search className="w-3.5 h-3.5" /> Graph Stats
           </Button>

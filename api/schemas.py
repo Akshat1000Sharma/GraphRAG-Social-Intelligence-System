@@ -7,6 +7,7 @@ import re
 
 VALID_DATASETS = ["facebook", "twitter", "reddit", "demo", "all"]
 VALID_MODES    = ["hybrid", "graph", "vector"]
+VALID_GNN_DATASETS = ["facebook", "twitter", "reddit"]
 
 class ValidationInfo(BaseModel):
     is_valid: bool
@@ -64,6 +65,8 @@ class ChatRequest(BaseModel):
     """R4: NL question over Neo4j graph data."""
     message: str = Field(..., min_length=1, max_length=2000)
     dataset: Optional[str] = Field(default="all")
+    """Override which pretrained GNN weights to run (optional). If unset, GNN follows `dataset` (all/demo → facebook)."""
+    gnn_dataset: Optional[str] = Field(default=None)
     session_id: Optional[str] = None
     mode: Optional[str] = Field(default="hybrid")
     top_k: int = Field(default=10, ge=1, le=50)
@@ -75,6 +78,15 @@ class ChatRequest(BaseModel):
         if v and v not in VALID_DATASETS:
             raise ValueError(f"dataset must be one of {VALID_DATASETS}")
         return v or "all"
+
+    @field_validator("gnn_dataset")
+    @classmethod
+    def validate_gnn_dataset(cls, v: Optional[str]):
+        if v is None or v == "":
+            return None
+        if v not in VALID_GNN_DATASETS:
+            raise ValueError(f"gnn_dataset must be one of {VALID_GNN_DATASETS} or omitted")
+        return v
 
     @field_validator("mode")
     @classmethod
@@ -99,6 +111,10 @@ class ChatResponse(BaseModel):
     graph_context_summary: str = ""
     pipeline_timing_ms: Optional[Dict[str, float]] = None
     session_id: Optional[str] = None
+    gnn_dataset_used: Optional[str] = Field(
+        default=None,
+        description="Pretrained GNN used (facebook|twitter|reddit), aligned to dataset scope for GNN",
+    )
 
 class InsertUserRequest(BaseModel):
     dataset: str = Field(...)
