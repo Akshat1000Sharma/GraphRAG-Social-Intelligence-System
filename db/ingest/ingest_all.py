@@ -26,7 +26,7 @@ import logging
 import os
 import time
 from pathlib import Path
-from typing import Any, Dict, Generator, List, Optional, Tuple
+from typing import Any, Dict, Generator, List, Optional, Set, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +39,83 @@ from api.bootstrap.config import (
     INGEST_BATCH_SIZE,
     DatasetManifest,
 )
+
+
+# ── Data file resolution (data/facebook, data/twitter, data/reddit) ─────────
+
+def _resolve_twitter_edge_file(manifest: DatasetManifest) -> Optional[Path]:
+    """Find twitter edge list: env TWITTER_COMBINED_PATH, then data/twitter/*."""
+    explicit = os.getenv("TWITTER_COMBINED_PATH", "").strip()
+    if explicit:
+        p = Path(explicit)
+        if p.is_file():
+            return p
+    d = manifest.dir
+    for name in ("twitter_combined.txt", "twitter_combined", "twitter_edges.txt", "edges.txt"):
+        p = d / name
+        if p.is_file():
+            return p
+    for p in sorted(d.glob("*.txt")):
+        if p.is_file() and not p.name.startswith(".") and p.stat().st_size > 0:
+            logger.info("Twitter: using %s (first non-empty .txt in %s)", p.name, d)
+            return p
+    return None
+
+
+def _resolve_reddit_tsv(manifest: DatasetManifest) -> Optional[Path]:
+    explicit = os.getenv("REDDIT_TSV_PATH", "").strip()
+    if explicit:
+        p = Path(explicit)
+        if p.is_file():
+            return p
+    d = manifest.dir
+    for name in (
+        "soc-redditHyperlinks-title.tsv",
+        "soc-redditHyperlinks-title.txt",
+        "reddit_hyperlinks.tsv",
+    ):
+        p = d / name
+        if p.is_file():
+            return p
+    for p in d.glob("*.tsv"):
+        if p.is_file() and p.stat().st_size > 0:
+            logger.info("Reddit: using %s (first .tsv in %s)", p.name, d)
+            return p
+    return None
+
+
+def dataset_data_files_ready(manifest: DatasetManifest) -> bool:
+    """True if the expected on-disk files exist so a real Neo4j ingest can run."""
+    d = manifest.dir
+    if manifest.name == "facebook":
+        edges = d / "musae_facebook_edges.csv"
+        target = d / "musae_facebook_target.csv"
+        if edges.is_file() and target.is_file():
+            return True
+        # edges alone are enough to derive users (see _parse_facebook_nodes)
+        return edges.is_file()
+    if manifest.name == "twitter":
+        return _resolve_twitter_edge_file(manifest) is not None
+    if manifest.name == "reddit":
+        return _resolve_reddit_tsv(manifest) is not None
+    return manifest.all_required_present()
+
+
+def _ingest_had_data(dataset_name: str, result: Dict[str, Any]) -> bool:
+    if result.get("ingest_stub"):
+        return False
+    if result.get("ok") is False:
+        return False
+    u = int(result.get("users", 0) or 0)
+    p = int(result.get("posts", 0) or 0)
+    e = int(result.get("edges", 0) or 0)
+    if dataset_name == "reddit":
+        return (u + p) > 0 and e >= 0
+    if dataset_name == "facebook":
+        return u > 0
+    if dataset_name == "twitter":
+        return u > 0 and e > 0
+    return u > 0
 
 # ── Schema extensions ─────────────────────────────────────────────────────────
 
@@ -72,32 +149,53 @@ def _chunked(lst: List, size: int) -> Generator:
 
 # ── Facebook ingest ───────────────────────────────────────────────────────────
 
-def _parse_facebook_nodes(manifest: DatasetManifest) -> List[Dict]:
-    """Parse musae_facebook_target.csv → list of user dicts."""
+def _parse_facebook_nodes(manifest: DatasetManifest) -> Tuple[List[Dict], bool]:
+    """Parse musae_facebook_target.csv, or derive user ids from musae_facebook_edges.csv, or tiny stub."""
     target_path = manifest.dir / "musae_facebook_target.csv"
-    if not target_path.exists():
-        logger.warning("Facebook: target CSV not found, generating stub nodes")
-        return [{"source_id": str(i), "name": f"Page_{i}", "page_type": "unknown",
-                 "bio": f"Facebook page {i}", "follower_count": 0}
-                for i in range(10)]
-
-    nodes = []
+    edges_path = manifest.dir / "musae_facebook_edges.csv"
     page_type_influence = {"politician": 0.8, "government": 0.7, "tvshow": 0.6, "company": 0.5}
-    with open(target_path, newline="", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            pid = row.get("id", row.get("Id", ""))
-            ptype = row.get("page_type", "unknown")
-            pname = row.get("page_name", row.get("name", f"Page_{pid}"))
-            nodes.append({
-                "source_id":      str(pid),
-                "name":           pname,
-                "page_type":      ptype,
-                "bio":            f"Facebook {ptype}: {pname}",
+
+    if target_path.exists():
+        nodes: List[Dict] = []
+        with open(target_path, newline="", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                pid = row.get("id", row.get("Id", ""))
+                ptype = row.get("page_type", "unknown")
+                pname = row.get("page_name", row.get("name", f"Page_{pid}"))
+                nodes.append({
+                    "source_id":      str(pid),
+                    "name":           pname,
+                    "page_type":      ptype,
+                    "bio":            f"Facebook {ptype}: {pname}",
+                    "follower_count": 0,
+                    "influence_score": page_type_influence.get(ptype, 0.3),
+                })
+        return nodes, False
+
+    if edges_path.exists():
+        ids: Set[str] = set()
+        with open(edges_path, newline="", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                ids.add(str(row["id_1"]))
+                ids.add(str(row["id_2"]))
+        nodes = [
+            {
+                "source_id":      pid,
+                "name":           f"Page_{pid}",
+                "page_type":      "unknown",
+                "bio":            f"Facebook page {pid} (from edge list; add target CSV for names)",
                 "follower_count": 0,
-                "influence_score": page_type_influence.get(ptype, 0.3),
-            })
-    return nodes
+                "influence_score": 0.3,
+            }
+            for pid in sorted(ids, key=lambda x: int(x) if str(x).isdigit() else x)
+        ]
+        logger.info("Facebook: built %d user nodes from edge list (no target CSV)", len(nodes))
+        return nodes, False
+
+    logger.warning("Facebook: no target or edges CSV under %s — cannot ingest", manifest.dir)
+    return [], True
 
 
 def _parse_facebook_edges(manifest: DatasetManifest) -> List[Dict]:
@@ -115,8 +213,15 @@ def _parse_facebook_edges(manifest: DatasetManifest) -> List[Dict]:
 
 def ingest_facebook(neo4j_client, manifest: DatasetManifest, batch_size: int = INGEST_BATCH_SIZE):
     logger.info("Facebook: parsing nodes...")
-    nodes = _parse_facebook_nodes(manifest)
-    logger.info(f"Facebook: {len(nodes)} pages found")
+    nodes, ingest_stub = _parse_facebook_nodes(manifest)
+    logger.info(f"Facebook: {len(nodes)} pages found (stub={ingest_stub})")
+    if ingest_stub:
+        logger.error(
+            "Facebook: refusing to load 10 stub nodes into Neo4j — add musae_facebook_edges.csv "
+            "(and ideally musae_facebook_target.csv) under %s",
+            manifest.dir,
+        )
+        return {"users": 0, "edges": 0, "ingest_stub": True, "ok": False, "error": "no_real_facebook_files"}
 
     # Upsert users
     upsert_user_cypher = """
@@ -156,20 +261,20 @@ def ingest_facebook(neo4j_client, manifest: DatasetManifest, batch_size: int = I
         total_edges += len(chunk)
 
     logger.info(f"Facebook: ingest complete — {total_nodes} users, {total_edges} edges")
-    return {"users": total_nodes, "edges": total_edges}
+    return {"users": total_nodes, "edges": total_edges, "ingest_stub": ingest_stub}
 
 
 # ── Twitter ingest ────────────────────────────────────────────────────────────
 
 def _parse_twitter_edges(manifest: DatasetManifest, max_edges: int = 50000) -> Tuple[List[str], List[Dict]]:
-    """Parse twitter_combined.txt → unique user IDs and directed edges."""
-    txt_path = manifest.dir / "twitter_combined.txt"
-    if not txt_path.exists():
+    """Parse combined edge list (twitter_combined.txt or first *.txt) → user IDs and directed edges."""
+    txt_path = _resolve_twitter_edge_file(manifest)
+    if txt_path is None or not txt_path.is_file():
         return [], []
 
     user_ids = set()
     edges = []
-    with open(txt_path, encoding="utf-8") as f:
+    with open(txt_path, encoding="utf-8", errors="replace") as f:
         for i, line in enumerate(f):
             if i >= max_edges:
                 break
@@ -236,15 +341,17 @@ def ingest_twitter(neo4j_client, manifest: DatasetManifest, batch_size: int = IN
     """)
 
     logger.info(f"Twitter: ingest complete — {total_nodes} users, {total_edges} edges")
-    return {"users": total_nodes, "edges": total_edges}
+    if total_nodes == 0:
+        return {"users": 0, "edges": 0, "ingest_stub": True, "ok": False, "error": "no_edges_parsed"}
+    return {"users": total_nodes, "edges": total_edges, "ingest_stub": False}
 
 
 # ── Reddit ingest ─────────────────────────────────────────────────────────────
 
 def _parse_reddit_edges(manifest: DatasetManifest, max_rows: int = 30000) -> Tuple[List[str], List[Dict], List[Dict]]:
-    """Parse soc-redditHyperlinks-title.tsv → subreddits + edges + posts."""
-    tsv_path = manifest.dir / "soc-redditHyperlinks-title.tsv"
-    if not tsv_path.exists():
+    """Parse Reddit hyperlinks TSV → subreddits + edges + posts."""
+    tsv_path = _resolve_reddit_tsv(manifest)
+    if tsv_path is None or not tsv_path.is_file():
         return [], [], []
 
     subreddits = set()
@@ -358,7 +465,16 @@ def ingest_reddit(neo4j_client, manifest: DatasetManifest, batch_size: int = ING
     """)
 
     logger.info(f"Reddit: ingest complete — {total_users} users, {total_posts} posts, {total_edges} edges")
-    return {"users": total_users, "posts": total_posts, "edges": total_edges}
+    if total_users == 0 and total_posts == 0:
+        return {
+            "users": 0,
+            "posts": 0,
+            "edges": 0,
+            "ingest_stub": True,
+            "ok": False,
+            "error": "no_reddit_rows_parsed",
+        }
+    return {"users": total_users, "posts": total_posts, "edges": total_edges, "ingest_stub": False}
 
 
 # ── Orchestrator ──────────────────────────────────────────────────────────────
@@ -436,8 +552,13 @@ def ingest_dataset(neo4j_client, dataset_name: str, force: bool = False) -> Dict
                 "counts": counts,
             }
 
-    if not manifest.all_required_present():
-        logger.warning(f"Dataset [{dataset_name}]: required files missing — skipping ingest")
+    if not dataset_data_files_ready(manifest):
+        logger.warning(
+            "Dataset [%s]: no loadable data files under %s — skipping. "
+            "See data/facebook, data/twitter, data/reddit in README.",
+            dataset_name,
+            manifest.dir,
+        )
         return {"dataset": dataset_name, "status": "skipped_files_missing", "ok": False}
 
     ingestor = DATASET_INGESTORS.get(dataset_name)
@@ -448,6 +569,21 @@ def ingest_dataset(neo4j_client, dataset_name: str, force: bool = False) -> Dict
     t0 = time.time()
     try:
         result = ingestor(neo4j_client, manifest)
+        if not _ingest_had_data(dataset_name, result):
+            st = "ingest_stub_or_empty" if result.get("ingest_stub") else "ingest_empty"
+            logger.error(
+                "Dataset [%s]: Neo4j ingest produced no usable data: %s. Not writing .ingest marker. "
+                "Add dataset files, then: POST /datasets/ingest?dataset=%s&force=true",
+                dataset_name,
+                result,
+                dataset_name,
+            )
+            return {
+                "dataset": dataset_name,
+                "status": st,
+                "ok": False,
+                "result": result,
+            }
         manifest.mark_ingested()
         elapsed = round(time.time() - t0, 1)
         counts = get_dataset_counts(neo4j_client, dataset_name)

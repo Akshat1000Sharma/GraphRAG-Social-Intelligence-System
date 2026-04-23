@@ -24,6 +24,9 @@ AUTO_DOWNLOAD = os.getenv("AUTO_DOWNLOAD_DATASETS", "true").lower() == "true"
 # Whether to ingest into Neo4j at startup
 AUTO_INGEST = os.getenv("AUTO_INGEST_NEO4J", "true").lower() == "true"
 
+# When AUTO_INGEST is false, optionally seed small demo users/posts (not Snap datasets)
+SEED_DEMO_NEO4J = os.getenv("SEED_DEMO_NEO4J", "false").lower() == "true"
+
 # Force reingest even if marker exists
 FORCE_REINGEST = os.getenv("FORCE_REINGEST", "false").lower() == "true"
 
@@ -87,7 +90,7 @@ FACEBOOK_MANIFEST = DatasetManifest(
     name="facebook",
     local_dir=DATA_DIR / "facebook",
     description="Facebook Large Page-Page Network (MUSAE). Pages as users, mutual likes as FRIEND edges.",
-    ingest_version="v1",
+    ingest_version="v2",
     files=[
         DatasetFile(
             filename="musae_facebook_edges.csv",
@@ -127,7 +130,7 @@ TWITTER_MANIFEST = DatasetManifest(
     name="twitter",
     local_dir=DATA_DIR / "twitter",
     description="Twitter Ego Networks (SNAP). Follow relationships as FRIEND edges.",
-    ingest_version="v1",
+    ingest_version="v2",
     files=[
         DatasetFile(
             filename="twitter_combined.txt",
@@ -149,7 +152,7 @@ REDDIT_MANIFEST = DatasetManifest(
     name="reddit",
     local_dir=DATA_DIR / "reddit",
     description="Reddit Hyperlink Network (SNAP). Subreddits as users, hyperlinks as FRIEND edges.",
-    ingest_version="v1",
+    ingest_version="v2",
     files=[
         DatasetFile(
             filename="soc-redditHyperlinks-title.tsv",

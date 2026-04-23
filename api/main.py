@@ -54,7 +54,7 @@ from api.schemas import (
     NLInsertParseRequest, NLInsertParseResponse,
     DatasetsStatusResponse, DatasetStatus, IngestResponse,
 )
-from api.bootstrap.config import ALL_DATASETS, AUTO_INGEST, FORCE_REINGEST
+from api.bootstrap.config import ALL_DATASETS, AUTO_INGEST, FORCE_REINGEST, SEED_DEMO_NEO4J
 
 logging.basicConfig(
     level=logging.INFO,
@@ -111,8 +111,8 @@ async def lifespan(app: FastAPI):
             )
         except Exception as e:
             logger.warning(f"Dataset ingest error: {e}")
-    elif app_state.neo4j and app_state.neo4j.is_connected:
-        # Always seed demo data if no real datasets loaded
+    elif app_state.neo4j and app_state.neo4j.is_connected and SEED_DEMO_NEO4J:
+        # Optional tiny demo graph (id=user_N) when ingest is off — not Snap datasets; default off.
         try:
             app_state.neo4j.seed_demo_data()
         except Exception as e:
