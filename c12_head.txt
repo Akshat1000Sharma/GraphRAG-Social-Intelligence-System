@@ -1,0 +1,13 @@
+import os, torch, numpy as np, pandas as pd
+import torch.nn as nn
+import torch.nn.functional as F
+from torch_geometric.data import Data
+from torch_geometric.utils import to_undirected
+from torch_geometric.nn import SAGEConv
+from sklearn.metrics import accuracy_score, f1_score, roc_auc_score
+
+DEV = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+# ─── FEATURES ─────────────────────────────────────
+def structural_features(num_nodes, edge_index, dim=128):
+    deg = torch.zeros(num_nod
