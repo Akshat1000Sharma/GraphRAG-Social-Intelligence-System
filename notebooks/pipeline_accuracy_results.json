@@ -1,0 +1,15 @@
+{
+    "heavy_search": true,
+    "device": "cuda",
+    "acc_gnn_test": 0.9483756119270138,
+    "acc_pipeline_test": 0.9483756119270138,
+    "best_val_tuning": 1.0,
+    "best_graph_tag": "mh",
+    "best_eta_hist": 0.0,
+    "best_logit_temp": 1.0,
+    "best_alpha": 0.0,
+    "best_tau": 1.5,
+    "best_min_conf": 0.05999999865889549,
+    "best_zeta_mh": 0.0,
+    "seconds_wall": 1853.1534597873688
+  }
