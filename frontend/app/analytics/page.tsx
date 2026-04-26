@@ -53,7 +53,7 @@ export default function AnalyticsPage() {
   const load = async () => {
     setLoading(true); setError(null);
     try {
-      const r = await api.graphTrendingPosts(parseInt(topK), topic || undefined);
+      const r = await api.graphTrendingPosts(parseInt(topK), topic || undefined, 48, dataset);
       setPosts(r.posts);
     } catch (e) { setError(String(e)); } finally { setLoading(false); }
   };

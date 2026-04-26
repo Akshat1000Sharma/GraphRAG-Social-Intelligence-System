@@ -179,14 +179,19 @@ async def lifespan(app: FastAPI):
     if vec_ret is None:
         vec_ret = _NullVector()
 
+    app_state.graph_service = GraphQueryService(app_state.neo4j)
     app_state.retriever = HybridRetriever(graph_retriever=graph_ret, vector_retriever=vec_ret)
     app_state.pipeline = MultiAgentPipeline(
         retriever=app_state.retriever,
         inference_manager=inference_manager,
+        graph_query_service=app_state.graph_service,
     )
-    app_state.chat_service   = ChatService(pipeline=app_state.pipeline, neo4j_client=app_state.neo4j)
+    app_state.chat_service   = ChatService(
+        pipeline=app_state.pipeline,
+        neo4j_client=app_state.neo4j,
+        graph_query_service=app_state.graph_service,
+    )
     app_state.insert_service = InsertService(neo4j_client=app_state.neo4j)
-    app_state.graph_service  = GraphQueryService(app_state.neo4j)
 
     logger.info("=== API ready ===")
     yield
@@ -353,6 +358,10 @@ async def recommend_friends(
     dataset: Optional[str] = Query(default="all"),
     gnn_dataset: Optional[str] = Query(default=None, description="Override GNN: facebook|twitter|reddit"),
 ):
+    """
+    NL pipeline over the same Neo4j rows as ``GET /graph/friend-recommendations/{user_id}``
+    (``GraphQueryService.friend_recommendations_for_llm`` → LLM context).
+    """
     if not app_state.pipeline:
         raise HTTPException(503, "Pipeline not initialized")
     if not app_state.neo4j or not app_state.neo4j.is_connected:
@@ -486,14 +495,15 @@ async def graph_trending_posts(
     top_k: int = Query(default=10, ge=1, le=100),
     topic: Optional[str] = Query(default=None),
     hours_window: int = Query(default=48, ge=1, le=24 * 30),
+    dataset: Optional[str] = Query(default=None),
 ):
     """Trending posts by engagement score (likes + 2×comments)."""
     if not app_state.graph_service:
         raise HTTPException(503, "Graph service not initialized")
     rows = app_state.graph_service.get_trending_posts(
-        top_k=top_k, topic=topic, hours_window=hours_window
+        top_k=top_k, topic=topic, hours_window=hours_window, dataset=dataset
     )
-    return {"top_k": top_k, "topic": topic, "hours_window": hours_window, "posts": rows}
+    return {"top_k": top_k, "topic": topic, "hours_window": hours_window, "dataset": dataset, "posts": rows}
 
 
 @app.get("/graph/users/{user_id}/influence-stats", tags=["Graph (direct)"])
@@ -509,7 +519,10 @@ async def graph_connection_path(
     user_a: str = Query(..., description="First user id or source_id"),
     user_b: str = Query(..., description="Second user id or source_id"),
 ):
-    """Shortest path, mutual friends, and common liked posts between two users."""
+    """
+    Shortest path, mutual friends, and common liked posts between two users.
+    POST /chat with a shortest-path question uses the same GraphQueryService.get_connection_path logic.
+    """
     if not app_state.graph_service:
         raise HTTPException(503, "Graph service not initialized")
     return app_state.graph_service.get_connection_path(user_a, user_b)

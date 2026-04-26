@@ -47,9 +47,19 @@ class AnalyzedQuery:
 
 INTENT_PATTERNS = {
     QueryIntent.FRIEND_RECOMMENDATION: [
-        r"recommend.*friend", r"suggest.*friend", r"who should.*connect",
-        r"friend.*suggest", r"people.*know", r"new.*connection",
-        r"who.*follow", r"similar.*user",
+        r"recommend.*friend",
+        r"friend.*recommend",  # "Friend recommendations for …" (noun-first phrasing)
+        r"recommendations?\s+for",
+        r"suggest.*friend",
+        r"who should.*connect",
+        r"friend.*suggest",
+        r"people.*know",
+        r"new.*connection",
+        r"who.*follow",
+        r"similar.*user",
+        r"\bfof\b",
+        r"friend-of-friend",
+        r"friends?\s+of\s+friends?",
     ],
     QueryIntent.INFLUENCER_DETECTION: [
         r"influencer", r"influence", r"top.*user", r"popular.*user",
@@ -168,29 +178,72 @@ class QueryAnalyzerAgent:
         """Extract user IDs, names, and other entities from query and context."""
         entities = {}
 
-        # From context (API-level parameters)
-        if "user_id" in context:
-            entities["user_id"] = context["user_id"]
-        if "user_a" in context:
-            entities["user_a"] = context["user_a"]
-        if "user_b" in context:
-            entities["user_b"] = context["user_b"]
-        if "post_id" in context:
-            entities["post_id"] = context["post_id"]
+        def _nz(key: str) -> Optional[str]:
+            v = context.get(key)
+            if v is None:
+                return None
+            s = str(v).strip()
+            return s or None
+
+        # From context (API-level parameters) — only non-empty strings
+        uid_ctx = _nz("user_id")
+        if uid_ctx:
+            entities["user_id"] = uid_ctx
+        ua = _nz("user_a")
+        if ua:
+            entities["user_a"] = ua
+        ub = _nz("user_b")
+        if ub:
+            entities["user_b"] = ub
+        pid = _nz("post_id")
+        if pid:
+            entities["post_id"] = pid
         # R3: dataset scoping threaded from context
-        if "dataset" in context:
-            entities["dataset"] = context["dataset"]
+        if "dataset" in context and context["dataset"] is not None:
+            ds = str(context["dataset"]).strip()
+            if ds:
+                entities["dataset"] = ds
 
-        # Extract from query text
-        # Match "user_X" or "user X" patterns
-        user_matches = re.findall(r"user[_\s](\w+)", query, re.IGNORECASE)
-        if user_matches and "user_id" not in entities:
-            entities["user_id"] = f"user_{user_matches[0]}"
+        # Match specific dataset IDs (fb_0, tw_123, rd_456, etc.) or user_X
+        specific_id_matches = re.findall(r"\b((?:fb|tw|rd|user)_[a-zA-Z0-9]+)\b", query, re.IGNORECASE)
+        if specific_id_matches and not entities.get("user_id"):
+            entities["user_id"] = specific_id_matches[0].lower()
 
-        # Match explicit IDs
+        # user_id = 1 / user_id=fb_1 (word boundary: plain \bid would not match inside "user_id")
+        uid_eq = re.search(r"\buser_id\s*=\s*([a-zA-Z0-9_]+)", query, re.IGNORECASE)
+        if uid_eq and not entities.get("user_id"):
+            entities["user_id"] = uid_eq.group(1).strip()
+
+        # Match explicit IDs like 'id 4224', 'id=4224', 'id: fb_4224'
         id_matches = re.findall(r"\bid[:\s=_]+([a-zA-Z0-9_]+)", query, re.IGNORECASE)
-        if id_matches:
-            entities["extracted_ids"] = id_matches
+        if id_matches and not entities.get("user_id"):
+            matched = id_matches[0]
+            if matched.isdigit():
+                entities["user_id"] = matched
+            else:
+                entities["user_id"] = matched
+
+        # "user 4224", "user #4224"
+        if not entities.get("user_id"):
+            user_num = re.search(
+                r"\buser\s*#?\s*([a-zA-Z0-9_]+)\b", query, re.IGNORECASE
+            )
+            if user_num:
+                entities["user_id"] = user_num.group(1)
+
+        # Match standalone numbers if still no user_id (prefer last digit group — "user id 4224")
+        if not entities.get("user_id"):
+            number_matches = re.findall(r"\b(\d+)\b", query)
+            if number_matches:
+                ds = entities.get("dataset", "")
+                prefix = ""
+                if ds == "facebook":
+                    prefix = "fb_"
+                elif ds == "twitter":
+                    prefix = "tw_"
+                elif ds == "reddit":
+                    prefix = "rd_"
+                entities["user_id"] = f"{prefix}{number_matches[-1]}"
 
         return entities
 

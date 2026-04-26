@@ -184,6 +184,11 @@ class SynthesizerAgent:
 
         # Graph context summary (for prompt injection)
         response.graph_context_summary = self._summarize_graph_context(hybrid_ctx)
+        if analyzed.intent == QueryIntent.USER_PROFILE and response.structured_data:
+            response.graph_context_summary += (
+                " The first JSON object is the focal user (id/name/bio/friends/posts); "
+                "summarize only that record, not other users."
+            )
         response.sources = self._identify_sources(hybrid_ctx)
 
         # LLM-generated insight (Pydantic-parsed or fallback)
@@ -192,6 +197,7 @@ class SynthesizerAgent:
             QueryIntent.FRIEND_RECOMMENDATION,
             QueryIntent.INFLUENCER_DETECTION,
             QueryIntent.TRENDING_POSTS,
+            QueryIntent.USER_PROFILE,
         )
 
         if needs_llm:

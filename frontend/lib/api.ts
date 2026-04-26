@@ -247,9 +247,9 @@ export const api = {
     request<{ user_id: string; top_k: number; recommendations: FriendRec[] }>(
       `/graph/friend-recommendations/${userId}?top_k=${topK}`
     ),
-  graphTrendingPosts: (topK = 10, topic?: string, hoursWindow = 48) =>
-    request<{ top_k: number; topic?: string; hours_window: number; posts: TrendingPost[] }>(
-      `/graph/trending-posts?top_k=${topK}&hours_window=${hoursWindow}${topic ? `&topic=${topic}` : ""}`
+  graphTrendingPosts: (topK = 10, topic?: string, hoursWindow = 48, dataset?: string) =>
+    request<{ top_k: number; topic?: string; hours_window: number; dataset?: string; posts: TrendingPost[] }>(
+      `/graph/trending-posts?top_k=${topK}&hours_window=${hoursWindow}${topic ? `&topic=${topic}` : ""}${dataset && dataset !== "all" ? `&dataset=${dataset}` : ""}`
     ),
   graphUserStats: (userId: string) =>
     request<UserInfluenceStats>(`/graph/users/${userId}/influence-stats`),

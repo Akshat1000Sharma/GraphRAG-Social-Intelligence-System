@@ -81,7 +81,8 @@ class GraphRetriever:
             WITH fof, count(friend) AS mutual_count
             ORDER BY mutual_count DESC LIMIT $top_k
             RETURN fof.id AS id, fof.name AS name,
-                   mutual_count AS mutual_friends, fof.influence_score AS influence_score
+                   mutual_count AS mutual_friends, fof.influence_score AS influence_score,
+                   fof.follower_count AS follower_count
         """,
         "user_profile": """
             MATCH (u:User)
@@ -153,16 +154,24 @@ class GraphRetriever:
             ORDER BY score DESC LIMIT $top_k
         """,
         # ── Dataset-scoped versions of key queries (R3) ───────────────────────
+        # Dataset in chat context scopes results when the property exists; if nodes have no
+        # `dataset` (legacy / unlabeled import), still match so behavior matches
+        # GraphQueryService.get_friend_recommendations and /graph/friend-recommendations.
         "friend_recommendation_ds": """
-            MATCH (u:User {dataset: $dataset})
-            WHERE u.id = $user_id OR u.source_id = $user_id
-            MATCH (u)-[:FRIEND]->(friend:User {dataset: $dataset})
-            MATCH (friend)-[:FRIEND]->(fof:User {dataset: $dataset})
-            WHERE fof <> u AND NOT (u)-[:FRIEND]->(fof)
+            MATCH (u:User)
+            WHERE (u.id = $user_id OR u.source_id = $user_id)
+              AND (u.dataset IS NULL OR u.dataset = $dataset)
+            MATCH (u)-[:FRIEND]->(friend:User)
+            WHERE (friend.dataset IS NULL OR friend.dataset = $dataset)
+            MATCH (friend)-[:FRIEND]->(fof:User)
+            WHERE fof <> u
+              AND NOT (u)-[:FRIEND]->(fof)
+              AND (fof.dataset IS NULL OR fof.dataset = $dataset)
             WITH fof, count(friend) AS mutual_count
             ORDER BY mutual_count DESC LIMIT $top_k
             RETURN fof.id AS id, fof.name AS name,
                    mutual_count AS mutual_friends, fof.influence_score AS influence_score,
+                   fof.follower_count AS follower_count,
                    fof.dataset AS dataset
         """,
         "influence_stats_ds": """
@@ -381,19 +390,22 @@ class HybridRetriever:
     ) -> HybridContext:
         ctx = HybridContext(retrieval_mode=mode)
 
-        # ── Neo4j-native hybrid: friend recommendations ───────────────────────
-        if mode == RetrievalMode.HYBRID and query_type == "friend_recommendation" and nl_query:
-            user_id = params.get("user_id", "")
-            if user_id:
-                vc = self.vector.search_friends_semantically(user_id, nl_query, top_k=top_k)
-                ctx.vector_context = vc
-                ctx.fused_entities = vc.results[:top_k]
-                ctx.fusion_scores  = {
-                    r.get("id", str(i)): r.get("fusion_score", r.get("similarity_score", 0))
-                    for i, r in enumerate(ctx.fused_entities)
-                }
-                ctx.metadata["fusion_method"] = "neo4j_native_hybrid"
-                return ctx
+        # Locked graph intents: never blend unrelated vector hits when the UI sends mode=hybrid
+        if (
+            query_type.startswith("user_profile")
+            or query_type.startswith("influence_stats")
+            or query_type.startswith("explain_connection")
+        ):
+            mode = RetrievalMode.GRAPH
+            ctx.retrieval_mode = mode
+
+        # Friend recommendations: same mutual-friend Cypher as Graph Explorer (graph-only).
+        # The previous "native hybrid" path ranked FoF by embedding similarity to the *whole*
+        # NL string, which produced unrelated users; hybrid+RRF with vector search_users()
+        # on that string had the same problem.
+        if query_type.startswith("friend_recommendation"):
+            mode = RetrievalMode.GRAPH
+            ctx.retrieval_mode = mode
 
         # ── Neo4j-native hybrid: trending posts ───────────────────────────────
         if mode == RetrievalMode.HYBRID and query_type == "trending_posts" and nl_query:
@@ -427,10 +439,17 @@ class HybridRetriever:
         """Reciprocal Rank Fusion. Source is now Neo4j vector, not FAISS."""
         fusion_scores: Dict[str, float] = {}
 
+        def _row_key(entity: Dict[str, Any], rank: int) -> str:
+            """Stable string key: Neo4j may return int ids; None id must not desync rank vs entity_map."""
+            for key in ("id", "user_id", "post_id"):
+                v = entity.get(key)
+                if v is not None and v != "":
+                    return str(v)
+            return f"__row_{rank}__"
+
         if ctx.graph_context and ctx.graph_context.primary_entities:
             for rank, entity in enumerate(ctx.graph_context.primary_entities[:top_k]):
-                eid = (entity.get("id") or entity.get("user_id")
-                       or entity.get("post_id") or str(rank))
+                eid = _row_key(entity, rank)
                 fusion_scores[eid] = (
                     fusion_scores.get(eid, 0)
                     + self.graph_weight * (1.0 / (k + rank + 1))
@@ -438,7 +457,7 @@ class HybridRetriever:
 
         if ctx.vector_context and ctx.vector_context.results:
             for rank, result in enumerate(ctx.vector_context.results[:top_k]):
-                eid = result.get("id") or result.get("user_id") or str(rank)
+                eid = _row_key(result, rank)
                 sim_boost = result.get("similarity_score", 0.5)
                 fusion_scores[eid] = (
                     fusion_scores.get(eid, 0)
@@ -449,15 +468,12 @@ class HybridRetriever:
 
         entity_map: Dict[str, Dict] = {}
         if ctx.graph_context:
-            for e in ctx.graph_context.primary_entities:
-                eid = e.get("id") or e.get("user_id") or e.get("post_id", "")
-                if eid:
-                    entity_map[eid] = {**e, "source": "graph"}
+            for rank, e in enumerate(ctx.graph_context.primary_entities):
+                eid = _row_key(e, rank)
+                entity_map[eid] = {**e, "source": "graph"}
         if ctx.vector_context:
-            for e in ctx.vector_context.results:
-                eid = e.get("id") or e.get("user_id", "")
-                if not eid:
-                    continue
+            for rank, e in enumerate(ctx.vector_context.results):
+                eid = _row_key(e, rank)
                 if eid not in entity_map:
                     entity_map[eid] = {**e, "source": "neo4j_vector"}
                 else:

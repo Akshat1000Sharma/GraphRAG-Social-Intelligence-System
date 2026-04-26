@@ -602,9 +602,11 @@ class Neo4jVectorRetriever:
         query_vector = self.engine.encode(query)
 
         cypher = """
-        // Step 1: get 2-hop candidates via graph traversal
-        MATCH (u:User {id: $user_id})-[:FRIEND]->(friend:User)-[:FRIEND]->(candidate:User)
-        WHERE candidate.id <> $user_id
+        // Step 1: anchor user by canonical id or source_id (matches Graph Explorer / ingest)
+        MATCH (u:User)
+        WHERE u.id = $user_id OR u.source_id = $user_id
+        MATCH (u)-[:FRIEND]->(friend:User)-[:FRIEND]->(candidate:User)
+        WHERE candidate <> u
           AND NOT (u)-[:FRIEND]->(candidate)
           AND candidate.text_embedding IS NOT NULL
         WITH candidate, count(friend) AS mutual_count

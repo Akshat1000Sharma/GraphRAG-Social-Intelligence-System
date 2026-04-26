@@ -21,6 +21,7 @@ Security:
 
 import logging
 import re
+import time
 import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -28,6 +29,12 @@ from api.bootstrap.config import (
     ALLOW_CHAT_INSERT,
     CHAT_INSERT_MAX_NODES,
     VALID_DATASET_NAMES,
+)
+from api.services.connection_path_nl import (
+    connection_path_result_row,
+    extract_two_user_ids,
+    format_connection_path_insight,
+    looks_like_connection_path_query,
 )
 from api.schemas import (
     ChatRequest, ChatResponse,
@@ -69,9 +76,10 @@ class ChatService:
     Adds dataset scoping, session tracking, and response formatting.
     """
 
-    def __init__(self, pipeline, neo4j_client=None):
+    def __init__(self, pipeline, neo4j_client=None, graph_query_service=None):
         self.pipeline   = pipeline
         self.neo4j      = neo4j_client
+        self.graph_query_service = graph_query_service
         self._sessions: Dict[str, List[Dict]] = {}  # session_id → history
 
     def query(self, req: ChatRequest) -> ChatResponse:
@@ -88,18 +96,78 @@ class ChatService:
                 datasets_cited=[],
             )
 
-        # Build context for the pipeline
-        context = inject_dataset_context(
-            context={
-                "user_id": req.user_id,
-                "mode": req.mode,
-            },
-            dataset=req.dataset,
-        )
-        if req.user_id:
-            context["user_id"] = req.user_id
+        # Build context for the pipeline (omit user_id when unset so the analyzer
+        # can parse IDs from the message; None/"" would block extraction)
+        base_ctx: Dict[str, Any] = {"mode": req.mode}
+        if req.user_id and str(req.user_id).strip():
+            base_ctx["user_id"] = str(req.user_id).strip()
+        context = inject_dataset_context(context=base_ctx, dataset=req.dataset)
         if req.gnn_dataset:
             context["gnn_dataset"] = req.gnn_dataset
+
+        # Two-user shortest path / connection: same as GET /graph/connection-path (no RAG)
+        if self.graph_query_service and looks_like_connection_path_query(req.message):
+            t0 = time.time()
+            user_a, user_b = extract_two_user_ids(req.message)
+            if user_a and user_b:
+                try:
+                    path = self.graph_query_service.get_connection_path(
+                        str(user_a).strip(), str(user_b).strip()
+                    )
+                except Exception as e:
+                    logger.warning("get_connection_path from chat: %s", e)
+                    path = {
+                        "shortest_path": None,
+                        "common_friends": [],
+                        "common_liked_posts": [],
+                    }
+                row = connection_path_result_row(
+                    str(user_a).strip(), str(user_b).strip(), path
+                )
+                insight = format_connection_path_insight(row)
+                elapsed = (time.time() - t0) * 1000
+                resp = ChatResponse(
+                    message=req.message,
+                    dataset_queried=req.dataset or "all",
+                    mode=req.mode or "hybrid",
+                    intent="connection_path",
+                    results=[row],
+                    insight=insight,
+                    datasets_cited=([req.dataset] if req.dataset and req.dataset != "all" else []),
+                    graph_context_summary=insight,
+                    pipeline_timing_ms={
+                        "connection_path": round(elapsed, 2),
+                        "total": round(elapsed, 2),
+                    },
+                    session_id=req.session_id,
+                    gnn_dataset_used=req.gnn_dataset
+                    or (req.dataset if req.dataset in ("facebook", "twitter", "reddit") else "facebook"),
+                )
+            else:
+                resp = ChatResponse(
+                    message=req.message,
+                    dataset_queried=req.dataset or "all",
+                    mode=req.mode or "hybrid",
+                    intent="connection_path",
+                    results=[],
+                    insight=(
+                        "I could not extract two user ids (e.g. `user id = 1` and `user id = 2`). "
+                        "Rephrase with both ids, or set USE_LLM=true for LLM-based extraction when ids are not explicit."
+                    ),
+                    datasets_cited=[],
+                    graph_context_summary="",
+                    session_id=req.session_id,
+                    gnn_dataset_used=req.gnn_dataset,
+                )
+            if req.session_id:
+                if req.session_id not in self._sessions:
+                    self._sessions[req.session_id] = []
+                self._sessions[req.session_id].append({
+                    "message": req.message,
+                    "intent": "connection_path",
+                    "dataset": req.dataset,
+                })
+            return resp
 
         # Run pipeline (dataset filter passed as context, agents thread it through)
         result = self.pipeline.run(

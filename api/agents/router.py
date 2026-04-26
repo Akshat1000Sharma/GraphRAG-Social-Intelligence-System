@@ -71,7 +71,7 @@ class RouterAgent:
         QueryIntent.USER_PROFILE: {
             "query_type": "user_profile",
             "preferred_mode": RetrievalMode.GRAPH,
-            "lock_mode": False,
+            "lock_mode": True,
             "neo4j_capability": "cypher_aggregation",
         },
         QueryIntent.CONTENT_SEARCH: {
@@ -139,9 +139,21 @@ class RouterAgent:
         return query_type, params, mode
 
     def _build_params(self, intent, entities, constraints) -> Dict[str, Any]:
-        user_id = entities.get("user_id", "user_1")
-        user_a  = entities.get("user_a", entities.get("user_id", "user_1"))
-        user_b  = entities.get("user_b", "user_2")
+        def _uid(v, default="user_1"):
+            if v is None:
+                return default
+            s = str(v).strip()
+            return s if s else default
+
+        raw_uid = entities.get("user_id")
+        # Do not invent user_1 for profile-style queries — empty graph is better than wrong user
+        if intent == QueryIntent.USER_PROFILE:
+            user_id = _uid(raw_uid, default="")
+        else:
+            user_id = _uid(raw_uid, default="user_1")
+
+        user_a = _uid(entities.get("user_a"), default=user_id or "user_1")
+        user_b = _uid(entities.get("user_b"), default="user_2")
         # R3: thread dataset through to retrieval params
         dataset = entities.get("dataset") or constraints.get("dataset")
 

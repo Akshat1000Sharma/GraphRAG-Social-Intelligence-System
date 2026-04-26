@@ -49,11 +49,22 @@ class GraphQueryService:
             logger.error(f"Friend recommendation query failed: {e}")
             return self._mock_recommendations(user_id, top_k)
 
+    def friend_recommendations_for_llm(
+        self,
+        user_id: str,
+        top_k: int = 10,
+    ) -> List[Dict[str, Any]]:
+        """
+        Same rows as GET /graph/friend-recommendations/{user_id} — use for /chat, /recommend-friends, and LLM context.
+        """
+        return self.get_friend_recommendations(user_id, top_k=top_k)
+
     def get_trending_posts(
         self,
         top_k: int = 10,
         topic: Optional[str] = None,
         hours_window: int = 48,
+        dataset: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """Get trending posts from Neo4j with engagement scoring."""
         if not self.db or not self.db.is_connected:
@@ -61,10 +72,11 @@ class GraphQueryService:
 
         since = (datetime.now() - timedelta(hours=hours_window)).isoformat()
 
-        base_query = """
-            MATCH (p:Post)
+        dataset_filter = " {dataset: $dataset}" if dataset and dataset != "all" else ""
+        base_query = f"""
+            MATCH (p:Post{dataset_filter})
             WITH p, p.like_count + (p.comment_count * 2) AS engagement
-            {topic_filter}
+            {{topic_filter}}
             ORDER BY engagement DESC
             LIMIT $top_k
             RETURN p.id AS id, p.title AS title, p.content AS content,
@@ -77,6 +89,8 @@ class GraphQueryService:
         params: Dict[str, Any] = {"top_k": top_k, "since": since}
         if topic:
             params["topic"] = topic
+        if dataset and dataset != "all":
+            params["dataset"] = dataset
 
         try:
             return self.db.run_query(query, params)
