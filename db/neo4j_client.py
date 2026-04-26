@@ -123,7 +123,7 @@ class Neo4jClient:
     # ─── Schema Setup ─────────────────────────────────────────────────────────
 
     def setup_schema(self):
-        """Create indexes, constraints, and vector index."""
+        """Create constraints, btree, and fulltext indexes (not vector indexes; those run at API startup)."""
         schema_queries = [
             # Uniqueness constraints
             "CREATE CONSTRAINT user_id IF NOT EXISTS FOR (u:User) REQUIRE u.id IS UNIQUE",
@@ -149,23 +149,6 @@ class Neo4jClient:
                 logger.debug(f"Schema: {q[:60]}...")
             except Exception as e:
                 logger.warning(f"Schema query skipped ({e}): {q[:60]}")
-
-        # Vector index for embeddings (Neo4j 5.x+)
-        vector_index_query = """
-        CREATE VECTOR INDEX user_embeddings IF NOT EXISTS
-        FOR (u:User) ON (u.embedding)
-        OPTIONS {
-          indexConfig: {
-            `vector.dimensions`: 128,
-            `vector.similarity_function`: 'cosine'
-          }
-        }
-        """
-        try:
-            self.run_write_query(vector_index_query)
-            logger.info("Vector index created/verified")
-        except Exception as e:
-            logger.warning(f"Vector index creation: {e}")
 
     # ─── Data Population ──────────────────────────────────────────────────────
 
