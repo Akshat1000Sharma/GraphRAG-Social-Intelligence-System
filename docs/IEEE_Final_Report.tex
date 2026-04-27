@@ -4,6 +4,7 @@
 \usepackage[english]{babel}
 \usepackage{amsmath,amssymb}
 \usepackage{graphicx}
+\usepackage{svg}          % SVG figure support (Overleaf: enable shell-escape)
 \usepackage{textcomp}
 \usepackage{booktabs}
 \usepackage{url}
@@ -45,7 +46,7 @@ Greater Noida, India\\
 
 % ============================================================
 \begin{abstract}
-We present a production-ready social network intelligence system that fuses Graph Neural Networks (GNNs) for structure-aware node classification and link prediction, hybrid Retrieval-Augmented Generation (RAG) over a Neo4j graph database with native vector indexes, and a six-stage multi-agent Knowledge-Augmented Generation (KAG) pipeline driven by a large language model. The system was developed incrementally: from exploratory RAG-only notebooks through GNN-only baselines to a GNN\,+\,semantic feature hybrid, evaluated on the SNAP Facebook Large Page--Page Network (22{,}470 nodes, 4 classes) and the SNAP ego-Twitter network (133{,}857 nodes, 4 degree-tier classes). On Facebook, GNN-only achieved 93.06\% test accuracy while GNN+RAG reached 94.37\%. On Twitter, GNN-only achieved 87.27\% while GNN+RAG reached 97.46\%. The runtime is delivered as a Python service layer (FastAPI), a Next.js web client with seven primary views, Dockerized dependencies, and Kaggle-based GPU training. This report documents the complete system: motivation, literature, methodology across six notebooks, system architecture, backend and frontend behavior, Neo4j query patterns, structured message examples, screenshot guidance, environment configuration, deployment, testing, and comprehensive experimental results.
+We present a production-ready social network intelligence system that fuses Graph Neural Networks (GNNs) for structure-aware node classification and link prediction, hybrid Retrieval-Augmented Generation (RAG) over a Neo4j graph database with native vector indexes, and a six-stage multi-agent Knowledge-Augmented Generation (KAG) pipeline driven by a large language model. The system was developed incrementally: from exploratory RAG-only notebooks through GNN-only baselines to a GNN\,+\,semantic feature hybrid, evaluated on the SNAP Facebook Large Page--Page Network (22{,}470 nodes, 4 classes) and the SNAP ego-Twitter network (133{,}857 nodes, 4 degree-tier classes). On Facebook, GNN-only achieved 93.06\% test accuracy while GNN+RAG reached 94.37\%. On Twitter, GNN-only achieved 87.27\% while GNN+RAG reached 93.48\%. The runtime is delivered as a Python service layer (FastAPI), a Next.js web client with seven primary views, Dockerized dependencies, and Kaggle-based GPU training. This report documents the complete system: motivation, literature, methodology across six notebooks, system architecture, backend and frontend behavior, Neo4j query patterns, structured message examples, environment configuration, deployment, testing, and comprehensive experimental results.
 \end{abstract}
 
 \begin{IEEEkeywords}
@@ -164,13 +165,10 @@ Text embeddings (384-d from MiniLM) are concatenated with sparse binary features
 \subsubsection{Twitter GNN+RAG}
 Per-node feature-grounded text documents include degree, structural features, circle strength, and top-$k$ SNAP BOW projections. L2-normalized text embeddings (384-d) are concatenated with graph features (385-d), yielding 769-d inputs. Architecture: \texttt{GNN\_RAG\_Model} with a learned text adapter (Linear $\rightarrow$ LayerNorm $\rightarrow$ GELU, bottleneck=96), 3 SAGEConv layers with BatchNorm, dropout=0.4, and a fusion+classifier head. NeighborLoader with [12,10,8] neighbors. Mixed-precision training (AMP). Early stopping on validation accuracy.
 
-\textbf{Results (best validation checkpoint):}
+\textbf{Results:}
 \begin{itemize}
-  \item Best Val Accuracy: \textbf{97.27\%}
-  \item Test Accuracy: \textbf{97.46\%}
-  \item Test F1 (macro): \textbf{0.9704}
-  \item Test AUC (macro OVR): \textbf{0.9920}
-  \item Train Accuracy: 97.44\%
+  \item \textbf{Train:} Accuracy \textbf{93.44\%}, F1 (macro) \textbf{0.9699}, AUC (macro OVR) \textbf{0.9931}
+  \item \textbf{Test:} Accuracy \textbf{93.48\%}, F1 (macro) \textbf{0.9307}, AUC (macro OVR) \textbf{0.9920}
 \end{itemize}
 
 % ============================================================
@@ -191,7 +189,7 @@ RAG-Only & Twitter & 133{,}857 & Qualitative only & --- & --- \\
 GNN-Only & Facebook & 22{,}470 & 0.9306 & 0.9278 & 0.9880 \\
 GNN-Only & Twitter & 133{,}857 & 0.8727 & 0.8573 & 0.9857 \\
 GNN+RAG & Facebook & 22{,}470 & \textbf{0.9437} & \textbf{0.9412} & \textbf{0.9918} \\
-GNN+RAG & Twitter & 133{,}857 & \textbf{0.9746} & \textbf{0.9704} & \textbf{0.9920} \\
+GNN+RAG & Twitter & 133{,}857 & \textbf{0.9348} & \textbf{0.9307} & \textbf{0.9920} \\
 \bottomrule
 \end{tabular}
 \end{table*}
@@ -199,7 +197,7 @@ GNN+RAG & Twitter & 133{,}857 & \textbf{0.9746} & \textbf{0.9704} & \textbf{0.99
 \subsection{Analysis}
 \begin{itemize}
   \item \textbf{Facebook:} GNN+RAG improves over GNN-only by +1.31\% accuracy, +1.34\% F1, and +0.38\% AUC. The semantic embeddings from page names and metadata provide discriminative signals beyond the sparse binary features.
-  \item \textbf{Twitter:} GNN+RAG improves over GNN-only by +10.19\% accuracy, +11.31\% F1. The feature-grounded per-node text (containing degree, circle strength, and top BOW projections) provides substantially richer signal than structural features alone for the larger, more heterogeneous ego-network.
+  \item \textbf{Twitter:} GNN+RAG improves over GNN-only by +6.21\% accuracy, +7.34\% F1, and +0.63\% AUC. The feature-grounded per-node text (containing degree, circle strength, and top BOW projections) provides substantially richer signal than structural features alone for the larger, more heterogeneous ego-network.
   \item \textbf{RAG-Only:} Provides qualitative question-answering capability but cannot perform principled classification---graph structure is essential for accurate node-level prediction.
 \end{itemize}
 
@@ -218,18 +216,11 @@ The runtime system processes queries through a six-stage multi-agent pipeline:
   \item \textbf{Validator:} 6-step grounding checks, deduplication, and confidence scoring to prevent hallucination.
 \end{enumerate}
 
-% Architecture diagram placeholder
 \begin{figure}[t]
-\centering
-\fbox{\parbox{0.9\linewidth}{\centering\vspace{1em}
-\texttt{User Query} $\rightarrow$ \texttt{Analyzer} $\rightarrow$ \texttt{Router} \\[4pt]
-$\rightarrow$ \texttt{Graph + Vector Retrievers (RRF)} \\[4pt]
-$\rightarrow$ \texttt{GNN Inference (CPU)} \\[4pt]
-$\rightarrow$ \texttt{Synthesizer (KAG/LLM)} $\rightarrow$ \texttt{Validator} \\[4pt]
-$\rightarrow$ \texttt{Structured JSON + NL Insight}
-\vspace{1em}}}
-\caption{Six-stage multi-agent pipeline for queries over the social graph. \textit{Image: Screenshot of the architecture ASCII diagram from README.md or the frontend pipeline visualization.}}
-\label{fig:arch}
+  \centering
+  \includesvg[width=\columnwidth,inkscapelatex=false]{figure}
+  \caption{Pipeline comparison across the three system configurations: GNN-RAG (left), RAG-only (center), and GNN-only (right), showing per-stage dataset, encoding, graph construction, model, vector ingestion, and LLM components.}
+  \label{fig:arch}
 \end{figure}
 
 \subsection{Neo4j as Unified Backend}
@@ -270,8 +261,8 @@ GATConv (in, 128, heads=4) $\rightarrow$ ELU $\rightarrow$ GATConv (512, 64, hea
 
 This section summarizes the service layer; Section~\ref{tab:features} groups capabilities by function, and Section~\ref{sec:neo4j_cypher} documents Cypher templates and graph service behavior.
 
-\subsection{Service architecture}
-The server process (\texttt{api/main.py}) is organized as a modular FastAPI application. Functionality is grouped by concern: \textbf{operations and diagnostics} (connectivity to Neo4j, vector index state, optional re-embedding jobs, which GNN checkpoints are loaded); \textbf{conversational analytics} (full multi-agent pipeline for natural-language questions, plus a lightweight path for ad-hoc GraphRAG-style queries); \textbf{direct graph analytics} (parameterized services for friend-of-friend suggestions, trending content, per-user influence aggregates, shortest path and common context between two users, link-prediction candidates, and global influencer ranking---each implemented in \texttt{GraphQueryService} with parameterized Cypher only); \textbf{data stewardship} (natural-language and structured insert flows with preview/confirm, dataset availability, and bulk re-ingest from prepared artifacts); and \textbf{recommendation and explanation} (pipeline-backed friend recommendations, link prediction, influence and trending questions, and pairwise connection explanation). Section~\ref{tab:features} summarizes how these capabilities map to user-facing features without enumerating wire-level details.
+\subsection{Service Architecture}
+The server process (\texttt{api/main.py}) is organized as a modular FastAPI application. Functionality is grouped by concern: \textbf{operations and diagnostics} (connectivity to Neo4j, vector index state, optional re-embedding jobs, which GNN checkpoints are loaded); \textbf{conversational analytics} (full multi-agent pipeline for natural-language questions, plus a lightweight path for ad-hoc GraphRAG-style queries); \textbf{direct graph analytics} (parameterized services for friend-of-friend suggestions, trending content, per-user influence aggregates, shortest path and common context between two users, link-prediction candidates, and global influencer ranking---each implemented in \texttt{GraphQueryService} with parameterized Cypher only); \textbf{data stewardship} (natural-language and structured insert flows with preview/confirm, dataset availability, and bulk re-ingest from prepared artifacts); and \textbf{recommendation and explanation} (pipeline-backed friend recommendations, link prediction, influence and trending questions, and pairwise connection explanation).
 
 \subsection{Multi-Agent Pipeline}
 Located in \texttt{api/agents/}: \texttt{analyzer.py} (intent detection via LLM), \texttt{router.py} (retrieval mode selection), \texttt{retrievers.py} (delegates to HybridRetriever), \texttt{synthesizer.py} (KAG: GNN + RAG + LLM fusion), \texttt{validator.py} (grounding, dedup, confidence). The pipeline returns structured JSON with millisecond timing per stage.
@@ -294,13 +285,13 @@ The frontend is built with Next.js (React) and TailwindCSS, providing 7 interact
   \item \textbf{Admin:} Natural-language and form-driven graph inserts without hand-written Cypher.
 \end{enumerate}
 
-\subsection{Client layer and configuration}
+\subsection{Client Layer and Configuration}
 The web client centralizes service access in \texttt{frontend/lib/api.ts}, with the backend base address supplied at build time through environment configuration. TypeScript types (\texttt{ChatResponse}, \texttt{ConnectionPath}, \texttt{InsertResult}, etc.) align with server payloads for type-safe rendering.
 
 % ============================================================
-\section{Backend Feature Catalog (Implementation Mapping)}
+\section{Backend Feature Catalog}
 
-Table~\ref{tab:features} groups runtime capabilities as they are implemented in \texttt{api/main.py} and related modules. The table describes \emph{what} the system does for users and \emph{how} it is wired internally; it does not prescribe URL layout.
+Table~\ref{tab:features} groups runtime capabilities as they are implemented in \texttt{api/main.py} and related modules.
 
 \begin{table*}[t]
 \centering
@@ -322,24 +313,23 @@ Graph mutations & Inserts and updates via validated, parameterized Cypher: natur
 \end{tabular}
 \end{table*}
 
-\subsection{Structured response contracts}
-The conversational service returns a \texttt{ChatResponse} bundle: user message echo, scope (\texttt{dataset\_queried}, \texttt{mode}), detected \texttt{intent} (e.g., friend recommendation, connection path, trending), \texttt{results} (tabular rows), natural-language \texttt{insight}, \texttt{graph\_context\_summary}, per-stage \texttt{pipeline\_timing\_ms}, and which GNN family was used. A lower-level program interface to the same pipeline may additionally expose validation metadata and retrieval mode. Field names in the repository serve as a stable contract between server and client.
+\subsection{Structured Response Contracts}
+The conversational service returns a \texttt{ChatResponse} bundle: user message echo, scope (\texttt{dataset\_queried}, \texttt{mode}), detected \texttt{intent} (e.g., friend recommendation, connection path, trending), \texttt{results} (tabular rows), natural-language \texttt{insight}, \texttt{graph\_context\_summary}, per-stage \texttt{pipeline\_timing\_ms}, and which GNN family was used.
 
-\subsection{When graph queries bypass the LLM stack}
-The graph query service layer executes Cypher only. Friend recommendations requested through chat or through the explorer can reuse the same \texttt{get\_friend\_recommendations} (or \texttt{friend\_recommendations\_for\_llm}) implementation so the model sees rows identical to the direct graph service. Two-user path questions resolved in natural language invoke \texttt{get\_connection\_path} with identifiers from pattern matching or a small LLM extract, then return structured path data to the client.
+\subsection{When Graph Queries Bypass the LLM Stack}
+The graph query service layer executes Cypher only. Friend recommendations requested through chat or through the explorer reuse the same \texttt{get\_friend\_recommendations} implementation so the model sees rows identical to the direct graph service. Two-user path questions invoke \texttt{get\_connection\_path} with identifiers extracted by pattern matching or LLM, then return structured path data to the client.
 
 % ============================================================
 \section{Neo4j Schema, Indexes, and Cypher Patterns}
 \label{sec:neo4j_cypher}
 
-\subsection{Property graph model}
-User nodes (optionally \texttt{dataset} for multi-tenant scoping) carry \texttt{id}, \texttt{source\_id}, \texttt{name}, \texttt{bio}, \texttt{follower\_count}, \texttt{influence\_score}, \texttt{text\_embedding} (384-d), \texttt{gnn\_embedding} (128-d). Posts: \texttt{id}, \texttt{title}, \texttt{content}, \texttt{like\_count}, \texttt{comment\_count}, \texttt{topic}, \texttt{created\_at}. Relationships: \texttt{FRIEND}, \texttt{POSTED}, \texttt{LIKED}. Ingested SNAP data set \texttt{u.id = 'fb\_' + source\_id} (Facebook) and analogous prefixes for Twitter/Reddit.
+\subsection{Property Graph Model}
+User nodes carry \texttt{id}, \texttt{source\_id}, \texttt{name}, \texttt{bio}, \texttt{follower\_count}, \texttt{influence\_score}, \texttt{text\_embedding} (384-d), \texttt{gnn\_embedding} (128-d). Posts: \texttt{id}, \texttt{title}, \texttt{content}, \texttt{like\_count}, \texttt{comment\_count}, \texttt{topic}, \texttt{created\_at}. Relationships: \texttt{FRIEND}, \texttt{POSTED}, \texttt{LIKED}. Ingested SNAP data uses \texttt{u.id = 'fb\_' + source\_id} (Facebook) and analogous prefixes for Twitter.
 
-\subsection{Vector indexes (Neo4j~5)}
+\subsection{Vector Indexes (Neo4j 5)}
 \texttt{user\_text\_embeddings} (cosine, 384-d), \texttt{user\_gnn\_embeddings} (cosine, 128-d), \texttt{post\_text\_embeddings} (cosine, 384-d), built via \texttt{Neo4jVectorSchemaManager} at API startup, populated by \texttt{Neo4jEmbeddingPopulator}.
 
-\subsection{Representative Cypher (retrieval templates)}
-The \texttt{GraphRetriever.QUERY\_TEMPLATES} in \texttt{rag/hybrid\_retrieval.py} parameterize Cypher. Examples:
+\subsection{Representative Cypher Retrieval Templates}
 
 \noindent\textbf{Friend of friend (recommendation):}
 \begin{lstlisting}[language=SQL, basicstyle=\ttfamily\tiny]
@@ -352,7 +342,7 @@ ORDER BY mutual_count DESC LIMIT $top_k
 RETURN fof.id AS id, fof.name AS name, ...
 \end{lstlisting}
 
-\noindent\textbf{Connection path (GraphQueryService)---shortest path + context:}
+\noindent\textbf{Connection path---shortest path + context:}
 \begin{lstlisting}[language=SQL, basicstyle=\ttfamily\tiny]
 MATCH (a:User), (b:User)
 WHERE (a.id = $user_a OR a.source_id = $user_a)
@@ -362,88 +352,63 @@ RETURN [n IN nodes(path) | n.name] AS node_names,
        [r IN relationships(path) | type(r)] AS rel_types,
        length(path) AS hops LIMIT 1
 \end{lstlisting}
-Additional queries in the same service fetch \texttt{FRIEND} triangles (common friends) and \texttt{LIKED} post intersection.
 
 \noindent\textbf{Full-text posts:}
-\begin{lstlisting}[
-  language=SQL, basicstyle=\ttfamily\footnotesize, breaklines=true, breakatwhitespace=true,
-  frame=none, aboveskip=2pt, belowskip=2pt, columns=fullflexible, showstringspaces=false
-]
+\begin{lstlisting}[language=SQL, basicstyle=\ttfamily\footnotesize]
 CALL db.index.fulltext.queryNodes(
   'post_content', $query) ...
 \end{lstlisting}
-\noindent\begin{minipage}{\columnwidth}\raggedright\small
-\textbf{Vector ANN:} \texttt{db.index.vector.queryNodes} in\\
-\texttt{rag/neo4j\_vector\_store.py}
-\end{minipage}
+
+\noindent\textbf{Vector ANN:} \texttt{db.index.vector.queryNodes} in \texttt{rag/neo4j\_vector\_store.py}.
 
 \subsection{Reciprocal Rank Fusion}
-When graph and vector lists are merged in Python, \texttt{HybridRetriever.\_rrf\_fuse} uses RRF with weights \texttt{graph\_weight=0.6}, \texttt{vector\_weight=0.4}, $k=60$. Friend-recommendation use cases often force \texttt{RetrievalMode.GRAPH} to avoid spurious vector matches on long NL strings.
+When graph and vector lists are merged in Python, \texttt{HybridRetriever.\_rrf\_fuse} uses RRF with weights \texttt{graph\_weight=0.6}, \texttt{vector\_weight=0.4}, $k=60$. Friend-recommendation use cases often force \texttt{RetrievalMode.GRAPH} to avoid spurious vector matches on long natural-language strings.
 
 % ============================================================
 \section{End-to-End Feature Walkthroughs}
 
 \begin{enumerate}
-  \item \textbf{Friend recommendations.} The Explore view calls \texttt{api.graphFriendRecs(userId)}, which issues a typed client request to the read-only \texttt{GraphQueryService} path so the UI always receives the same row shape as a server-side Cypher call. The Chat view submits natural-language friend requests with \texttt{dataset} and \texttt{user\_id} context; the pipeline resolves the subject user and reuses the same \texttt{GraphQueryService} logic before the synthesizer, so list rows match the direct graph path.
-  \item \textbf{Connection Explorer.} \texttt{connections/page.tsx} calls \texttt{api.graphConnectionPath(a,b)} for structured shortest path, mutual-friend, and co-like rows, and may call \texttt{api.explainConnection} to obtain a pipeline-generated narrative. The graph call is Cypher-only; the explainer call invokes the multi-agent layer for natural-language text.
-  \item \textbf{Shortest path via chat.} Phrases like ``shortest path of friends between users with user id = 1 and user id = 2'' are detected in \texttt{connection\_path\_nl.py}; two IDs are taken by regex (or Gemini extraction); \texttt{get\_connection\_path} results are returned as \texttt{intent=connection\_path} with a single structured row.
+  \item \textbf{Friend recommendations.} The Explore view calls \texttt{api.graphFriendRecs(userId)}, which issues a typed client request to the read-only \texttt{GraphQueryService} path. The Chat view submits natural-language friend requests with \texttt{dataset} and \texttt{user\_id} context; the pipeline reuses the same \texttt{GraphQueryService} logic before synthesis.
+  \item \textbf{Connection Explorer.} \texttt{connections/page.tsx} calls \texttt{api.graphConnectionPath(a,b)} for structured shortest-path, mutual-friend, and co-like rows, and may call \texttt{api.explainConnection} to obtain a pipeline-generated narrative. The graph call is Cypher-only; the explainer call invokes the multi-agent layer.
+  \item \textbf{Shortest path via chat.} Phrases such as ``shortest path of friends between users with user id = 1 and user id = 2'' are detected in \texttt{connection\_path\_nl.py}; two IDs are taken by regex or Gemini extraction; \texttt{get\_connection\_path} results are returned as \texttt{intent=connection\_path} with a single structured row.
   \item \textbf{Admin natural-language insert.} The admin flow calls the insert service with a \texttt{confirm} flag: preview mode returns a dry-run of parameterized Cypher; confirmed execution runs validated \texttt{MERGE} with dataset scoping.
-  \item \textbf{Dataset operations.} Operators can trigger re-ingest of downloaded SNAP-style bundles into Neo4j from the service layer; the health payload surfaces per-dataset node and edge counts for verification.
+  \item \textbf{Dataset operations.} Operators can trigger re-ingest of SNAP-style bundles into Neo4j from the service layer; the health payload surfaces per-dataset node and edge counts for verification.
 \end{enumerate}
 
 % ============================================================
 \section{Illustrative JSON Examples}
 
-\noindent\textbf{Health and diagnostics JSON} (abridged shape):
+\noindent\textbf{Health and diagnostics JSON} (abridged):
 \begin{lstlisting}[basicstyle=\ttfamily\tiny]
-{ "status": "healthy", "neo4j_connected": true, "vector_backend": "neo4j",
+{ "status": "healthy", "neo4j_connected": true,
+  "vector_backend": "neo4j",
   "gnn_datasets": ["facebook","twitter","reddit"],
-  "dataset_counts": { "facebook": { "users": 22470, "edges": 171002 } } }
+  "dataset_counts": {
+    "facebook": {"users": 22470, "edges": 171002}
+  }
+}
 \end{lstlisting}
 
 \noindent\textbf{Conversational request body} for a friend-recommendation question (abridged):
 \begin{lstlisting}[basicstyle=\ttfamily\tiny]
-{ "message": "Friend recommendations for user_id = 1", "dataset": "facebook",
-  "mode": "hybrid", "top_k": 10, "gnn_dataset": "facebook" }
+{ "message": "Friend recommendations for user_id = 1",
+  "dataset": "facebook", "mode": "hybrid",
+  "top_k": 10, "gnn_dataset": "facebook" }
 \end{lstlisting}
-\noindent The corresponding \texttt{ChatResponse} includes \texttt{results} with \texttt{id}, \texttt{name}, \texttt{mutual\_friends}, \texttt{influence\_score}, \texttt{follower\_count}, and \texttt{insight} text.
+The corresponding \texttt{ChatResponse} includes \texttt{results} with \texttt{id}, \texttt{name}, \texttt{mutual\_friends}, \texttt{influence\_score}, \texttt{follower\_count}, and \texttt{insight} text.
 
-\noindent\textbf{Connection path JSON} (two user identifiers, abridged):
+\noindent\textbf{Connection path JSON} (abridged):
 \begin{lstlisting}[basicstyle=\ttfamily\tiny]
-{ "shortest_path": { "node_names": ["A","B","C"],
+{ "shortest_path": {
+    "node_names": ["A","B","C"],
     "rel_types": ["FRIEND","FRIEND"], "hops": 2 },
-  "common_friends": [...], "common_liked_posts": [...] }
+  "common_friends": [...],
+  "common_liked_posts": [...] }
 \end{lstlisting}
-Replace node names and arrays with real outputs from your Neo4j instance for the report.
-
-% ============================================================
-\section{Visual Documentation and Screenshot Checklist}
-When preparing the final PDF, upload images to the Overleaf project (e.g., folder \texttt{figures/}) and replace the placeholders with \verb|\includegraphics|.
-
-\begin{itemize}
-  \item \textbf{fig\_dashboard.png} --- Home dashboard: health cards, pipeline animation, dataset statistics.
-  \item \textbf{fig\_chat.png} --- Chat: message, insight, \texttt{pipeline\_timing\_ms}, raw JSON.
-  \item \textbf{fig\_explore.png} --- Graph Explorer: friend recs, influencers, link candidates.
-  \item \textbf{fig\_analytics.png} --- Analytics: trending/engagement charts.
-  \item \textbf{fig\_users.png} --- Users: profile and GNN role.
-  \item \textbf{fig\_connections.png} --- Connection Explorer: From/To fields, path result, ``AI Explain''.
-  \item \textbf{fig\_admin.png} --- Admin: NL or structured insert preview.
-  \item \textbf{fig\_neo4j\_browser.png} --- Sample \texttt{MATCH} showing \texttt{User} and \texttt{FRIEND} degree.
-  \item \textbf{fig\_swagger.png} --- FastAPI auto-generated interactive schema and request explorer (from OpenAPI metadata).
-\end{itemize}
-
-\noindent\textit{Example placeholder (remove after adding real images):}
-\begin{figure*}[!t]
-\centering
-\fbox{\parbox{0.88\textwidth}{\centering\vspace{4em}
-\footnotesize (Screenshot: e.g., Connection Explorer with path result)\vspace{4em}\\}}
-\caption{Replace with a screen capture of the Connections UI; ensure user IDs in the form match a pair that exists in your loaded graph (see \texttt{README} or Neo4j \texttt{MATCH} sampling).}
-\label{fig:ui_connections}
-\end{figure*}
 
 % ============================================================
 \section{Environment and Operational Configuration}
-Key variables (see project root \texttt{.env} and \texttt{api/bootstrap/config.py}): \texttt{NEO4J\_URI}, \texttt{NEO4J\_USER}, \texttt{NEO4J\_PASSWORD}, \texttt{NEO4J\_DATABASE}; \texttt{GEMINI\_MODEL}, \texttt{USE\_LLM} (kills LLM synthesis + NL extraction if \texttt{false}); \texttt{AUTO\_INGEST}, \texttt{SEED\_DEMO\_NEO4J}; embedding model via \texttt{get\_text\_engine}; frontend \texttt{NEXT\_PUBLIC\_API\_URL}. GNN weights live under \texttt{weights/} and are loaded by \texttt{inference\_manager}.
+Key variables (see project root \texttt{.env} and \texttt{api/bootstrap/config.py}): \texttt{NEO4J\_URI}, \texttt{NEO4J\_USER}, \texttt{NEO4J\_PASSWORD}, \texttt{NEO4J\_DATABASE}; \texttt{GEMINI\_MODEL}, \texttt{USE\_LLM} (disables LLM synthesis and NL extraction when set to \texttt{false}); \texttt{AUTO\_INGEST}, \texttt{SEED\_DEMO\_NEO4J}; embedding model via \texttt{get\_text\_engine}; frontend \texttt{NEXT\_PUBLIC\_API\_URL}. GNN weights live under \texttt{weights/} and are loaded by \texttt{inference\_manager}.
 
 % ============================================================
 \section{Deployment Infrastructure}
@@ -451,7 +416,7 @@ Key variables (see project root \texttt{.env} and \texttt{api/bootstrap/config.p
 \subsection{Docker}
 The system is containerized via \texttt{docker-compose.yml} with two services:
 \begin{itemize}
-  \item \textbf{neo4j:} Neo4j 5.13 Community with APOC plugin, 512MB--2GB heap, 512MB page cache, health check via \texttt{cypher-shell}.
+  \item \textbf{neo4j:} Neo4j 5.13 Community with APOC plugin, 512\,MB--2\,GB heap, 512\,MB page cache, health check via \texttt{cypher-shell}.
   \item \textbf{api:} Python 3.11-slim, \texttt{uvicorn} server on port 8000, pre-trained weights mounted read-only, health check via \texttt{curl}.
 \end{itemize}
 
@@ -480,14 +445,13 @@ LLM & Optional (degrades gracefully without API key) \\
 % ============================================================
 \section{Testing and Evaluation}
 
-\subsection{Automated tests}
-The \texttt{tests/} tree includes \texttt{test\_all.py} (unit and integration: service-level smoke tests for the HTTP layer, \texttt{HybridRetriever} RRF fusion, query analyzer, synthesizer, validator) and \texttt{testing\_pipeline\_accuracy.py} (loads saved GNN weights, stratified split, optional OneCycle fine-tuning, minimum accuracy gate). From the repository root, run:
+\subsection{Automated Tests}
+The \texttt{tests/} tree includes \texttt{test\_all.py} (unit and integration: service-level smoke tests for the HTTP layer, \texttt{HybridRetriever} RRF fusion, query analyzer, synthesizer, validator) and \texttt{testing\_pipeline\_accuracy.py} (loads saved GNN weights, stratified split, optional OneCycle fine-tuning, minimum accuracy gate). From the repository root:
 \begin{verbatim}
 pytest tests/test_all.py -v
 \end{verbatim}
-\noindent Together these exercises the conversational pipeline entry points and the direct graph service handlers without duplicating the same logic in the client.
 
-\subsection{Reproducibility and deployment}
+\subsection{Reproducibility and Deployment}
 Docker Compose in \texttt{docker/docker-compose.yml} starts Neo4j~5.13 and the API service; Kaggle remains the source of record for GPU training; dataset ingest is idempotent with markers under each dataset directory.
 
 % ============================================================
@@ -495,9 +459,9 @@ Docker Compose in \texttt{docker/docker-compose.yml} starts Neo4j~5.13 and the A
 
 We presented a GraphRAG-style social intelligence system integrating GNNs, Neo4j-backed hybrid retrieval, and LLM synthesis. Key findings:
 \begin{itemize}
-  \item GNN+RAG consistently outperforms GNN-only: +1.3\% on Facebook, +10.2\% on Twitter.
-  \item Semantic text features from SentenceTransformers provide discriminative power beyond structural graph features.
-  \item The multi-agent KAG pipeline enables natural language interaction with complex graph analytics.
+  \item GNN+RAG consistently outperforms GNN-only: +1.3\% on Facebook, +6.2\% on Twitter.
+  \item Semantic text features from SentenceTransformers provide discriminative power beyond structural graph features alone.
+  \item The multi-agent KAG pipeline enables natural-language interaction with complex graph analytics.
 \end{itemize}
 
 \textbf{Future work:} Scaling to larger graphs (Reddit dataset scaffolded), latency optimization, GAT architectures for all datasets, real-time graph updates, and user-facing confidence calibration.
